@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>⚡ TaskBoard — Kanban Board</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header>
+    <div class="logo-area">
+      <span class="logo-icon">⚡</span>
+      <span class="logo-title">TaskBoard</span>
+    </div>
+
+    <!-- Quick Stats -->
+    <div class="stats-bar">
+      <div class="stat-item"><span>Total:</span> <span class="num" id="statTotal">0</span></div>
+      <div class="stat-item" style="color: var(--accent-blue);"><span>📥 Open:</span> <span class="num" id="statOpen">0</span></div>
+      <div class="stat-item" style="color: var(--accent-yellow);"><span>⏳ Taken:</span> <span class="num" id="statInProgress">0</span></div>
+      <div class="stat-item" style="color: var(--accent-purple);"><span>🔍 Review:</span> <span class="num" id="statReview">0</span></div>
+      <div class="stat-item" style="color: var(--accent-green);"><span>✅ Done:</span> <span class="num" id="statCompleted">0</span></div>
+    </div>
+
+    <!-- Header Actions & Active User -->
+    <div class="header-actions">
+      <!-- Profile dropdown switcher -->
+      <div class="user-pill" title="Click to switch profile">
+        <div class="user-avatar" id="userAvatar">U</div>
+        <span id="userDisplayName" style="font-size: 0.85rem; font-weight: 500;">User</span>
+        <select id="profileSwitcher" class="filter-select" style="padding: 2px 6px; font-size: 0.75rem; border: none; background: transparent; color: var(--text-muted); cursor: pointer;" onchange="switchProfile(this.value)">
+          <option value="dmitry">@dmitry</option>
+          <option value="andrii">@andrii</option>
+          <option value="nikita">@nikita</option>
+        </select>
+      </div>
+
+      <button class="btn btn-primary" onclick="openCreateTaskModal()">
+        <span>➕</span> New Task
+      </button>
+
+      <button class="btn btn-outline" id="btnAiChat" onclick="openAiChatModal()" style="display: none; color: #38bdf8; border-color: rgba(56, 189, 248, 0.4);" title="Chat with Autonomous AI Agent">
+        <span>🤖</span> AI Assistant
+      </button>
+
+      <button class="btn btn-outline" onclick="openApiKeysModal()" title="Manage API Keys">
+        <span>🔑</span> API Keys
+      </button>
+
+      <a href="/api-docs" target="_blank" class="btn btn-outline" title="API Documentation">
+        <span>📚</span> API Docs
+      </a>
+
+      <button class="btn btn-outline" onclick="loadBoard()" title="Refresh Board">
+        <span>🔄</span>
+      </button>
+
+      <button class="btn btn-secondary btn-sm" onclick="handleLogout()" title="Log Out">
+        🚪
+      </button>
+    </div>
+  </header>
+
+  <!-- Filter Toolbar -->
+  <div class="toolbar">
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="searchBox" placeholder="Search tasks by title or content..." oninput="renderTasks()">
+    </div>
+
+    <div class="filter-group">
+      <span style="font-size: 0.85rem; color: var(--text-muted);">Assignee:</span>
+      <select id="filterAssignee" class="filter-select" onchange="renderTasks()">
+        <option value="">All Users</option>
+        <option value="dmitry">dmitry</option>
+        <option value="andrii">andrii</option>
+        <option value="nikita">nikita</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 4-Column Kanban Board -->
+  <main class="board-container">
+    
+    <!-- 1. Open Tasks -->
+    <div class="column">
+      <div class="column-header">
+        <div class="column-title">
+          <span>📥 Open Tasks</span>
+          <span class="col-badge badge-open" id="colBadgeOpen">0</span>
+        </div>
+      </div>
+      <div class="cards-list" id="cardsOpen"></div>
+    </div>
+
+    <!-- 2. In Progress / Taken -->
+    <div class="column">
+      <div class="column-header">
+        <div class="column-title">
+          <span>⏳ In Progress</span>
+          <span class="col-badge badge-in_progress" id="colBadgeInProgress">0</span>
+        </div>
+      </div>
+      <div class="cards-list" id="cardsInProgress"></div>
+    </div>
+
+    <!-- 3. Under Review -->
+    <div class="column">
+      <div class="column-header">
+        <div class="column-title">
+          <span>🔍 Under Review</span>
+          <span class="col-badge badge-review" id="colBadgeReview">0</span>
+        </div>
+      </div>
+      <div class="cards-list" id="cardsReview"></div>
+    </div>
+
+    <!-- 4. Completed -->
+    <div class="column">
+      <div class="column-header">
+        <div class="column-title">
+          <span>✅ Completed</span>
+          <span class="col-badge badge-completed" id="colBadgeCompleted">0</span>
+        </div>
+      </div>
+      <div class="cards-list" id="cardsCompleted"></div>
+    </div>
+
+  </main>
+
+  <!-- ----------------- MODALS ----------------- -->
+
+  <!-- 1. Auth / Login Modal -->
+  <div id="authModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 440px;">
+      <div class="modal-header">
+        <div class="modal-title">⚡ Welcome to TaskBoard</div>
+      </div>
+      <form onsubmit="handleLogin(event)">
+        <div class="modal-body">
+          <p style="font-size: 0.85rem; color: var(--text-muted);">
+            Please enter the site password to access the board.
+          </p>
+
+          <!-- Password Field -->
+          <div class="form-group">
+            <label class="form-label">Site Password</label>
+            <input type="password" id="loginPassword" class="form-input" placeholder="Enter password" required autofocus>
+          </div>
+
+          <!-- Account Selection -->
+          <div class="form-group">
+            <label class="form-label">Select Your Account</label>
+            <div class="profile-options">
+              <div class="profile-option selected" data-user="dmitry">
+                <div style="font-weight: 600; font-size: 0.95rem;">dmitry</div>
+              </div>
+              <div class="profile-option" data-user="andrii">
+                <div style="font-weight: 600; font-size: 0.95rem;">andrii</div>
+              </div>
+              <div class="profile-option" data-user="nikita">
+                <div style="font-weight: 600; font-size: 0.95rem;">nikita</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Nickname / Display Name Field -->
+          <div class="form-group">
+            <label class="form-label">Nickname (Optional)</label>
+            <input type="text" id="loginNickname" class="form-input" placeholder="e.g. Dmitry (Frontend)">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary" style="width: 100%;">
+            Unlock & Enter Board
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 2. Create Task Modal -->
+  <div id="createTaskModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title">➕ Create New Task</div>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('createTaskModal').style.display='none'">✕</button>
+      </div>
+      <form onsubmit="handleCreateTask(event)">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Task Title</label>
+            <input type="text" id="newTaskTitle" class="form-input" placeholder="e.g. Implement webhook retry mechanism" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Description / Specifications</label>
+            <textarea id="newTaskDesc" class="form-textarea" placeholder="Detailed requirements, links, or notes..."></textarea>
+          </div>
+
+          <!-- AI Permission Option -->
+          <div class="form-group" id="createTaskAiGroup" style="display: none;">
+            <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; background: #0f172a; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color);">
+              <input type="checkbox" id="newTaskAiEnabled" style="cursor: pointer; width: 16px; height: 16px;">
+              <div>
+                <div style="font-weight: 600; font-size: 0.85rem; color: var(--accent-blue);">🤖 Permit AI Agent Execution</div>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Autonomous worker on server 'andrii' (Gemini 3.8 Flash) will claim, implement, and test this task.</div>
+              </div>
+            </label>
+          </div>
+
+          <!-- File Dropzone & Paste Info -->
+          <div class="form-group">
+            <label class="form-label">Attachments</label>
+            <div class="dropzone" onclick="document.getElementById('createTaskFileInput').click()">
+              <span style="font-size: 1.5rem;">📎</span>
+              <span>Click to select file or <strong>paste image (Ctrl+V)</strong></span>
+              <span style="font-size: 0.75rem;">Images, documents, archives (max 25MB)</span>
+            </div>
+            <input type="file" id="createTaskFileInput" style="display: none;" onchange="if(this.files[0]) stageNewTaskFile(this.files[0])">
+            <div id="newTaskStagedFile" class="attachment-badge" style="display: none; margin-top: 8px;"></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="document.getElementById('createTaskModal').style.display='none'">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create Task</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 3. Task Details Modal -->
+  <div id="taskModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 680px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span id="modalTaskStatus" class="col-badge">OPEN</span>
+          <div class="modal-title" id="modalTaskTitle">Task Details</div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('taskModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body">
+        
+        <div id="modalTaskMeta" style="font-size: 0.8rem; color: var(--text-muted);"></div>
+
+        <!-- AI Permission Setting for Open Task -->
+        <div id="modalAiSection" style="display: none; background: #0f172a; padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); justify-content: space-between; align-items: center;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 0.85rem; font-weight: 600;">🤖 AI Autonomous Agent:</span>
+            <span id="modalAiStatusBadge" class="col-badge" style="font-size: 0.75rem;">Disabled</span>
+          </div>
+          <button id="modalAiToggleBtn" class="btn btn-outline btn-sm" onclick="toggleActiveTaskAi()">Toggle AI</button>
+        </div>
+
+        <div id="modalTaskRejection" class="rejection-banner" style="display: none;"></div>
+
+        <!-- Description -->
+        <div>
+          <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">Description:</div>
+          <div id="modalTaskDesc" style="background: #0f172a; padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-color); font-size: 0.9rem; white-space: pre-wrap;"></div>
+        </div>
+
+        <!-- Attachments -->
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-weight: 600; font-size: 0.85rem; color: var(--text-muted);">Attachments (Paste with Ctrl+V):</span>
+            <button class="btn btn-outline btn-sm" onclick="document.getElementById('taskModalFileInput').click()">+ Upload File</button>
+            <input type="file" id="taskModalFileInput" style="display: none;" onchange="if(this.files[0] && activeTaskModalId) uploadFileToTask(activeTaskModalId, this.files[0])">
+          </div>
+          <div id="modalTaskAttachments" class="attachments-preview"></div>
+        </div>
+
+        <!-- Comments & Activity -->
+        <div>
+          <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Comments & Activity:</div>
+          <div id="modalTaskComments" style="display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto;"></div>
+          
+          <div style="display: flex; gap: 8px; margin-top: 10px;">
+            <input type="text" id="newTaskCommentInput" class="form-input" placeholder="Type a comment..." style="flex: 1;" onkeydown="if(event.key==='Enter') addCommentToActiveTask()">
+            <button class="btn btn-primary btn-sm" onclick="addCommentToActiveTask()">Send</button>
+          </div>
+        </div>
+
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: space-between;">
+        <button class="btn btn-danger btn-sm" onclick="handleDeleteActiveTask()">🗑 Delete Task</button>
+        <button class="btn btn-secondary" onclick="document.getElementById('taskModal').style.display='none'">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Reject Task Modal -->
+  <div id="rejectModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 460px;">
+      <div class="modal-header">
+        <div class="modal-title">❌ Reject Task</div>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('rejectModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="rejectTaskId">
+        <p style="font-size: 0.85rem; color: var(--text-muted);">
+          Provide a reason for rejection. The task will be returned to <strong>Open Tasks</strong> along with your comment.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Rejection Reason / Explanation</label>
+          <textarea id="rejectReason" class="form-textarea" placeholder="e.g. Unit tests are missing; please fix validation on line 42." required></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="document.getElementById('rejectModal').style.display='none'">Cancel</button>
+        <button class="btn btn-danger" onclick="submitReject()">Reject & Return to Open</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. API Keys Modal -->
+  <div id="apiKeysModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 540px;">
+      <div class="modal-header">
+        <div class="modal-title">🔑 API Keys Management</div>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('apiKeysModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.85rem; color: var(--text-muted);">
+          API keys allow external scripts, CI/CD, and bots to interact with this Kanban system. Any user can generate keys.
+        </p>
+
+        <!-- Newly generated key alert -->
+        <div id="newGeneratedKeyArea" style="display: none; background: rgba(5, 150, 105, 0.15); border: 1px solid var(--accent-green); padding: 12px; border-radius: var(--radius-md);">
+          <div style="font-weight: 600; color: var(--accent-green); font-size: 0.85rem; margin-bottom: 6px;">
+            🎉 New API Key Generated:
+          </div>
+          <div style="display: flex; gap: 6px;">
+            <input type="text" id="newGeneratedKeyValue" class="form-input" readonly style="font-family: monospace; font-size: 0.8rem; flex: 1;">
+            <button class="btn btn-success btn-sm" onclick="copyApiKeyToClipboard()">Copy</button>
+          </div>
+          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
+            ⚠️ Save this key now! For security reasons, it cannot be displayed again.
+          </div>
+        </div>
+
+        <!-- Active Keys List -->
+        <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-muted);">Your Active API Keys:</div>
+        <div id="apiKeysList" style="display: flex; flex-direction: column; gap: 8px;"></div>
+
+        <!-- Generate new key form -->
+        <div style="border-top: 1px solid var(--border-color); padding-top: 12px; display: flex; gap: 8px;">
+          <input type="text" id="newKeyNameInput" class="form-input" placeholder="Key description (e.g. Python Script)" style="flex: 1;">
+          <button class="btn btn-primary" onclick="generateApiKey()">Generate Key</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="document.getElementById('apiKeysModal').style.display='none'">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. AI Chat Modal -->
+  <div id="aiChatModal" class="modal-overlay" style="display: none;">
+    <div class="modal-content" style="max-width: 680px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 1.3rem;">🤖</span>
+          <div>
+            <div class="modal-title">AI Assistant (Project: pixabay_farm)</div>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Model: gemini-3.8-flash (effort: medium) on server 'andrii'</div>
+          </div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('aiChatModal').style.display='none'">✕</button>
+      </div>
+      <div class="modal-body" style="padding-bottom: 8px;">
+        <!-- Context selector -->
+        <div class="ai-context-box">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-weight: 600;">📌 Task Context:</span>
+            <label style="font-size: 0.75rem; color: var(--text-muted); cursor: pointer;">
+              <input type="checkbox" id="aiSelectAllTasks" onchange="toggleSelectAllAiTasks(this.checked)" checked> Include All Tasks
+            </label>
+          </div>
+          <div class="ai-task-tags" id="aiTaskChipsList">
+            <!-- Dynamically populated chips -->
+          </div>
+        </div>
+
+        <!-- Chat messages -->
+        <div class="ai-chat-messages" id="aiChatMessages">
+          <div class="ai-msg agent">
+            👋 Hello! I am the Autonomous AI Agent deployed on server <strong>andrii</strong> working on <code>/home/neanod/source/music/pixabay_farm</code>.<br><br>
+            You can ask me questions about tasks, code architecture, current implementation state, or request guidance!
+          </div>
+        </div>
+
+        <!-- Input row -->
+        <div style="display: flex; gap: 8px; margin-top: 12px;">
+          <input type="text" id="aiChatInput" class="form-input" placeholder="Ask agent a question or discuss tasks..." style="flex: 1;" onkeydown="if(event.key==='Enter') sendAiChatMessage()">
+          <button class="btn btn-primary" id="aiChatSendBtn" onclick="sendAiChatMessage()">
+            <span>🚀</span> Send
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast"></div>
+
+  <!-- Scripts -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>📚 TaskBoard REST API — Documentation</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    body {
+      background: #0b1120;
+      color: #e2e8f0;
+      line-height: 1.6;
+    }
+    .docs-container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 32px 20px 80px;
+    }
+    .docs-header {
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 24px;
+      margin-bottom: 32px;
+    }
+    .docs-title {
+      font-size: 2.2rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      margin-bottom: 8px;
+    }
+    .badge-method {
+      display: inline-block;
+      font-weight: 700;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    .method-get { background: #0284c7; color: white; }
+    .method-post { background: #059669; color: white; }
+    .method-delete { background: #dc2626; color: white; }
+    
+    .endpoint-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+    .endpoint-header {
+      padding: 14px 18px;
+      background: rgba(15, 23, 42, 0.6);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: monospace;
+      font-size: 0.95rem;
+    }
+    .endpoint-body {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    pre {
+      background: #090d16;
+      border: 1px solid #1e293b;
+      padding: 14px;
+      border-radius: var(--radius-sm);
+      overflow-x: auto;
+      font-size: 0.85rem;
+      color: #38bdf8;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .pill {
+      background: rgba(56, 189, 248, 0.1);
+      color: var(--accent-blue);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 0.85rem;
+    }
+    th, td {
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      text-align: left;
+    }
+    th {
+      background: #0f172a;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="docs-container">
+    
+    <div class="docs-header">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+        <a href="/" class="btn btn-secondary btn-sm">← Back to Kanban Board</a>
+        <div style="display: flex; gap: 8px;">
+          <a href="/docs" target="_blank" class="btn btn-primary btn-sm">Interactive Swagger UI</a>
+          <a href="/redoc" target="_blank" class="btn btn-outline btn-sm">ReDoc</a>
+        </div>
+      </div>
+      <h1 class="docs-title">⚡ TaskBoard API Documentation</h1>
+      <p style="color: var(--text-muted); font-size: 1.05rem;">
+        Complete guide to authenticating, querying, creating tasks, managing the 4 Kanban workflow states, and uploading files programmatically.
+      </p>
+    </div>
+
+    <!-- Quick Overview -->
+    <section style="margin-bottom: 40px;">
+      <h2 style="font-size: 1.4rem; margin-bottom: 12px;">1. Authentication & API Keys</h2>
+      <p style="color: var(--text-muted); margin-bottom: 16px;">
+        All API requests must be authenticated. The API supports two header formats:
+      </p>
+      <pre><code>X-API-Key: kb_username_your_secret_token_here
+# OR
+Authorization: Bearer kb_username_your_secret_token_here</code></pre>
+      
+      <div style="background: rgba(56, 189, 248, 0.08); border-left: 4px solid var(--accent-blue); padding: 14px; border-radius: 4px; margin-top: 16px;">
+        <strong>How to issue API Keys:</strong>
+        <ul style="margin-left: 20px; margin-top: 6px; font-size: 0.9rem;">
+          <li><strong>Via Website:</strong> Click on <code>🔑 API Keys</code> in the top navigation bar, give the key a label, and click <em>Generate Key</em>.</li>
+          <li><strong>Via Telegram Bot:</strong> Open chat with <code>@tasksboard67bot</code>, click <code>🔑 API Keys</code>, and select <em>➕ Generate New API Key</em>.</li>
+          <li><strong>Via API:</strong> Existing authenticated clients can call <code>POST /api/v1/keys</code>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Security & Resilience -->
+    <section style="margin-bottom: 40px;">
+      <h2 style="font-size: 1.4rem; margin-bottom: 12px;">2. Security & Rate Limiting</h2>
+      <p style="color: var(--text-muted); margin-bottom: 10px;">
+        To defend against DDoS, brute-force, and exploits:
+      </p>
+      <table>
+        <thead>
+          <tr><th>Mechanism</th><th>Policy</th><th>Response on Violation</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Global API Rate Limit</strong></td>
+            <td>120 requests / minute per client IP</td>
+            <td><code>429 Too Many Requests</code></td>
+          </tr>
+          <tr>
+            <td><strong>Login Brute-Force Shield</strong></td>
+            <td>Max 5 login attempts / minute per IP</td>
+            <td><code>429 Too Many Requests</code></td>
+          </tr>
+          <tr>
+            <td><strong>File Upload Limit</strong></td>
+            <td>Max 25 MB per attachment</td>
+            <td><code>413 Payload Too Large</code></td>
+          </tr>
+          <tr>
+            <td><strong>Key Storage</strong></td>
+            <td>Salted SHA-256 hash in SQLite with WAL mode</td>
+            <td>Raw key cannot be recovered if DB leaked</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Endpoints Reference -->
+    <section style="margin-bottom: 40px;">
+      <h2 style="font-size: 1.4rem; margin-bottom: 16px;">3. REST API Endpoints</h2>
+
+      <!-- GET /api/v1/stats -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-get">GET</span>
+          <span>/api/v1/stats</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Get task count summary across all 4 columns.</p>
+          <pre><code>curl -H "X-API-Key: YOUR_KEY" https://your-domain.com:8445/api/v1/stats</code></pre>
+          <div style="font-size:0.8rem; color:var(--text-muted);">Response:</div>
+          <pre><code>{
+  "open": 4,
+  "in_progress": 2,
+  "review": 1,
+  "completed": 12,
+  "total": 19
+}</code></pre>
+        </div>
+      </div>
+
+      <!-- GET /api/v1/tasks -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-get">GET</span>
+          <span>/api/v1/tasks</span>
+        </div>
+        <div class="endpoint-body">
+          <p>List tasks. Optional query filters: <code>status</code> (<code>open</code>, <code>in_progress</code>, <code>review</code>, <code>completed</code>) and <code>assignee</code>.</p>
+          <pre><code>curl -H "X-API-Key: YOUR_KEY" "https://your-domain.com:8445/api/v1/tasks?status=open"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Create a new task in <code>open</code> status.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Refactor database indexing", "description": "Add index to task_id"}'</code></pre>
+        </div>
+      </div>
+
+      <!-- GET /api/v1/tasks/{id} -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-get">GET</span>
+          <span>/api/v1/tasks/{task_id}</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Get full task details including attachments and comments history.</p>
+          <pre><code>curl -H "X-API-Key: YOUR_KEY" https://your-domain.com:8445/api/v1/tasks/1</code></pre>
+        </div>
+      </div>
+
+      <!-- DELETE /api/v1/tasks/{id} -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-delete">DELETE</span>
+          <span>/api/v1/tasks/{task_id}</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Permanently delete a task, its attachments, and audit history.</p>
+          <pre><code>curl -X DELETE https://your-domain.com:8445/api/v1/tasks/1 \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/claim -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/claim</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Claim task into <strong>In Progress</strong>. The authenticated user becomes the <code>assignee</code>.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/claim \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/release -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/release</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Release an In Progress task back to <strong>Open</strong>.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/release \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/submit-review -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/submit-review</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Submit task for verification (moves to <strong>Under Review</strong>).</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/submit-review \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/approve -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/approve</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Approve task in review and mark as <strong>Completed</strong>. Records the authenticated user as <code>reviewed_by</code>.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/approve \
+  -H "X-API-Key: YOUR_KEY"</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/reject -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/reject</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Reject a task in review and return it to <strong>Open</strong> with a required comment.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/reject \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"comment": "Unit test coverage is below 80%. Please write tests for auth module."}'</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/tasks/{id}/attachments -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/tasks/{task_id}/attachments</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Upload a file or image attachment (multipart/form-data, max 25MB).</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/tasks/1/attachments \
+  -H "X-API-Key: YOUR_KEY" \
+  -F "file=@/path/to/screenshot.png"</code></pre>
+        </div>
+      </div>
+
+      <!-- GET /api/v1/attachments/{id} -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-get">GET</span>
+          <span>/api/v1/attachments/{attachment_id}</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Download or view an attachment file.</p>
+          <pre><code>curl -H "X-API-Key: YOUR_KEY" -O https://your-domain.com:8445/api/v1/attachments/att_id_here</code></pre>
+        </div>
+      </div>
+
+      <!-- POST /api/v1/keys -->
+      <div class="endpoint-card">
+        <div class="endpoint-header">
+          <span class="badge-method method-post">POST</span>
+          <span>/api/v1/keys</span>
+        </div>
+        <div class="endpoint-body">
+          <p>Generate a new API key.</p>
+          <pre><code>curl -X POST https://your-domain.com:8445/api/v1/keys \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI/CD Pipeline"}'</code></pre>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Code Examples -->
+    <section>
+      <h2 style="font-size: 1.4rem; margin-bottom: 16px;">4. Code Examples</h2>
+
+      <h3 style="font-size: 1.1rem; margin-bottom: 8px;">Python (httpx / requests)</h3>
+      <pre><code>import httpx
+
+API_KEY = "kb_dmitry_your_api_key_here"
+BASE_URL = "https://your-domain.com:8445"
+
+headers = {"X-API-Key": API_KEY}
+
+# 1. Create a task
+resp = httpx.post(f"{BASE_URL}/api/v1/tasks", headers=headers, json={
+    "title": "Automated security patch",
+    "description": "Triggered by security auditor."
+})
+task = resp.json()["task"]
+task_id = task["id"]
+print(f"Created Task #{task_id}")
+
+# 2. Claim task
+httpx.post(f"{BASE_URL}/api/v1/tasks/{task_id}/claim", headers=headers)
+
+# 3. Submit for review
+httpx.post(f"{BASE_URL}/api/v1/tasks/{task_id}/submit-review", headers=headers)
+
+# 4. Upload an attachment
+with open("report.pdf", "rb") as f:
+    httpx.post(f"{BASE_URL}/api/v1/tasks/{task_id}/attachments",
+               headers=headers, files={"file": f})
+</code></pre>
+
+      <h3 style="font-size: 1.1rem; margin-top: 24px; margin-bottom: 8px;">JavaScript / Node.js (fetch)</h3>
+      <pre><code>const API_KEY = "kb_dmitry_your_api_key_here";
+const BASE_URL = "https://your-domain.com:8445";
+
+async function run() {
+  const headers = {
+    "X-API-Key": API_KEY,
+    "Content-Type": "application/json"
+  };
+
+  // Get board stats
+  const statsRes = await fetch(`${BASE_URL}/api/v1/stats`, { headers });
+  console.log("Board stats:", await statsRes.json());
+}
+run();
+</code></pre>
+    </section>
+
+  </div>
+
+</body>
+</html>
