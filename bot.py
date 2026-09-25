@@ -83,6 +83,37 @@ async def update_or_send_main_message(chat_id: int, text: str, reply_markup: dic
             return new_id
     return None
 
+async def safe_edit_message_text(chat_id: int, message_id: Optional[int], text: str, reply_markup: dict) -> bool:
+    """
+    Safely edits a Telegram message with Markdown parsing.
+    If Telegram rejects due to entity parsing error or length,
+    automatically falls back to plain text truncated to 4000 chars.
+    """
+    if not message_id:
+        return False
+    # Attempt 1: Markdown parse mode with length clamped to 4000
+    res = await send_tg_request("editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:4000],
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
+    })
+    if res and res.get("ok"):
+        return True
+
+    logger.warning(f"editMessageText with Markdown failed in chat {chat_id}, trying plain text fallback...")
+
+    # Attempt 2: Plain text (strip backticks, asterisks, underscores) clamped to 3900
+    plain_text = text.replace("*", "").replace("`", "").replace("_", "")[:3900]
+    res_plain = await send_tg_request("editMessageText", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": plain_text,
+        "reply_markup": reply_markup
+    })
+    return bool(res_plain and res_plain.get("ok"))
+
 def is_admin_user(tg_id: int) -> bool:
     if config.ADMIN_TG_ID and tg_id == config.ADMIN_TG_ID:
         return True
@@ -325,15 +356,19 @@ def build_task_detail_text(task: dict) -> str:
 
     text += f"────────────────────────\n*Description:*\n"
     desc = task.get("description") or "_No description provided._"
+    if len(desc) > 600:
+        desc = desc[:597] + "..."
     text += f"{desc}\n────────────────────────\n"
 
     # Attachments
     attachments = task.get("attachments", [])
     if attachments:
         text += f"📎 *Attachments ({len(attachments)}):*\n"
-        for a in attachments:
+        for a in attachments[:5]:
             size_kb = max(1, a["file_size"] // 1024)
             text += f"• `{a['original_filename']}` ({size_kb} KB)\n"
+        if len(attachments) > 5:
+            text += f"_...and {len(attachments) - 5} more attachments_\n"
         text += "────────────────────────\n"
 
     # Recent Comments
@@ -341,9 +376,16 @@ def build_task_detail_text(task: dict) -> str:
     if comments:
         text += f"💬 *Recent Activity / Comments:*\n"
         for c in comments[-3:]:
-            prefix = "⚠️ " if c["comment_type"] == "rejection" else "• "
-            text += f"{prefix}*@{c['author']}*: {c['content']}\n"
+            prefix = "⚠️ " if c.get("comment_type") == "rejection" else "• "
+            c_author = c.get("author", "user")
+            c_content = (c.get("content") or "").strip()
+            if len(c_content) > 250:
+                c_content = c_content[:247] + "..."
+            text += f"{prefix}*@{c_author}*: {c_content}\n"
         text += "────────────────────────\n"
+
+    if len(text) > 3800:
+        text = text[:3750] + "\n\n...(truncated)"
 
     return text
 
@@ -592,13 +634,7 @@ async def handle_callback_query(cq: dict):
         text = build_main_menu_text(username, tg_id)
         reply_markup = build_main_menu_keyboard(tg_id)
         if message_id:
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, text, reply_markup)
 
     elif data.startswith("col:"):
         parts = data.split(":")
@@ -608,36 +644,23 @@ async def handle_callback_query(cq: dict):
         text = build_column_text(status_key, tasks, page)
         reply_markup = build_column_keyboard(status_key, tasks, page)
         if message_id:
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, text, reply_markup)
 
     elif data.startswith("task:"):
         task_id = int(data.split(":")[1])
         task = database.get_task(task_id)
         if not task:
             if message_id:
-                await send_tg_request("editMessageText", {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "text": f"❌ Task #{task_id} not found.",
-                    "reply_markup": {"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "nav:main"}]]}
-                })
+                await safe_edit_message_text(
+                    chat_id, message_id,
+                    f"❌ Task #{task_id} not found.",
+                    {"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "nav:main"}]]}
+                )
             return
         text = build_task_detail_text(task)
         reply_markup = build_task_keyboard(task, username)
         if message_id:
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, text, reply_markup)
 
     elif data.startswith("act:claim:"):
         task_id = int(data.split(":")[2])
@@ -645,10 +668,7 @@ async def handle_callback_query(cq: dict):
         if ok and updated_task:
             text = build_task_detail_text(updated_task)
             reply_markup = build_task_keyboard(updated_task, username)
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id, "message_id": message_id,
-                "text": f"✅ *{msg}*\n\n" + text, "parse_mode": "Markdown", "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, f"✅ *{msg}*\n\n" + text, reply_markup)
         else:
             await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"❌ {msg}", "show_alert": True})
 
@@ -658,10 +678,7 @@ async def handle_callback_query(cq: dict):
         if ok and updated_task:
             text = build_task_detail_text(updated_task)
             reply_markup = build_task_keyboard(updated_task, username)
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id, "message_id": message_id,
-                "text": f"ℹ️ *{msg}*\n\n" + text, "parse_mode": "Markdown", "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, f"ℹ️ *{msg}*\n\n" + text, reply_markup)
         else:
             await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"❌ {msg}", "show_alert": True})
 
@@ -671,10 +688,7 @@ async def handle_callback_query(cq: dict):
         if ok and updated_task:
             text = build_task_detail_text(updated_task)
             reply_markup = build_task_keyboard(updated_task, username)
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id, "message_id": message_id,
-                "text": f"🚀 *{msg}*\n\n" + text, "parse_mode": "Markdown", "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, f"🚀 *{msg}*\n\n" + text, reply_markup)
         else:
             await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"❌ {msg}", "show_alert": True})
 
@@ -684,10 +698,7 @@ async def handle_callback_query(cq: dict):
         if ok and updated_task:
             text = build_task_detail_text(updated_task)
             reply_markup = build_task_keyboard(updated_task, username)
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id, "message_id": message_id,
-                "text": f"🎉 *{msg}*\n\n" + text, "parse_mode": "Markdown", "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, f"🎉 *{msg}*\n\n" + text, reply_markup)
         else:
             await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"❌ {msg}", "show_alert": True})
 
@@ -856,13 +867,7 @@ async def handle_callback_query(cq: dict):
         status_word = "enabled" if new_val else "disabled"
         await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"🤖 AI Worker {status_word} for task #{task_id}"})
         if message_id:
-            await send_tg_request("editMessageText", {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
+            await safe_edit_message_text(chat_id, message_id, text, reply_markup)
 
     elif data == "prompt:run_ai":
         st = user_states.pop(tg_id, None)
