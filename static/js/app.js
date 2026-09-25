@@ -136,7 +136,7 @@ async function loadBoard() {
       }
       const createTaskAi = document.getElementById("createTaskAiGroup");
       if (createTaskAi) {
-        createTaskAi.style.display = aiModeActive ? "block" : "none";
+        createTaskAi.style.display = "block";
       }
     }
 
@@ -258,10 +258,7 @@ function createCardElement(task) {
   // Action buttons
   let actionsHtml = "";
   if (task.status === "open") {
-    let aiToggleBtn = "";
-    if (aiModeActive) {
-      aiToggleBtn = `<button class="btn btn-outline btn-sm" onclick="toggleTaskAi(${task.id})" style="font-size:0.75rem; border-color:${task.ai_enabled ? 'rgba(56,189,248,0.4)' : 'var(--border-color)'}; color:${task.ai_enabled ? 'var(--accent-blue)' : 'var(--text-muted)'};" title="Toggle AI Autonomous Execution">${task.ai_enabled ? '🤖 AI: ON' : '🤖 AI: OFF'}</button>`;
-    }
+    const aiToggleBtn = `<button class="btn btn-outline btn-sm" onclick="toggleTaskAi(${task.id})" style="font-size:0.75rem; border-color:${task.ai_enabled ? 'rgba(56,189,248,0.4)' : 'var(--border-color)'}; color:${task.ai_enabled ? 'var(--accent-blue)' : 'var(--text-muted)'};" title="Переключить разрешение для ИИ">${task.ai_enabled ? '🤖 AI: ✅ Вкл' : '🤖 AI: ❌ Выкл'}</button>`;
     actionsHtml = `
       <button class="btn btn-primary btn-sm" onclick="claimTask(${task.id})">🎯 Claim Task</button>
       ${aiToggleBtn}
@@ -592,7 +589,7 @@ async function openTaskModal(taskId) {
     const aiBadge = document.getElementById("modalAiStatusBadge");
     const aiToggleBtn = document.getElementById("modalAiToggleBtn");
     if (aiSection && aiBadge && aiToggleBtn) {
-      if (aiModeActive && task.status === "open") {
+      if (task.status === "open") {
         aiSection.style.display = "flex";
         if (task.ai_enabled) {
           aiBadge.innerText = "Allowed";

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import httpx
 import os
+import re
 import secrets
 from typing import Dict, Any, Optional
 
@@ -16,6 +17,8 @@ TELEGRAM_API_BASE = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
 # In-memory user state for conversation flows (e.g. creating task, rejecting, adding comment)
 # user_id -> {"state": "waiting_rejection", "task_id": 123}
 user_states: Dict[int, Dict[str, Any]] = {}
+active_bot_messages: Dict[int, int] = {}  # chat_id -> message_id of the bot's interactive menu message
+BOT_USERNAME = "tasksboard67bot"
 
 async def send_tg_request(method: str, payload: dict) -> Optional[dict]:
     url = f"{TELEGRAM_API_BASE}/{method}"
@@ -29,6 +32,56 @@ async def send_tg_request(method: str, payload: dict) -> Optional[dict]:
         except Exception as e:
             logger.error(f"Error calling Telegram API {method}: {e}")
             return None
+
+async def update_or_send_main_message(chat_id: int, text: str, reply_markup: dict, parse_mode: str = "Markdown") -> Optional[int]:
+    """
+    Edits the bot's single persistent interactive message in the chat,
+    or sends a new one if editing fails, remembering its message_id.
+    """
+    msg_id = active_bot_messages.get(chat_id)
+    if msg_id:
+        res = await send_tg_request("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "reply_markup": reply_markup
+        })
+        if res and res.get("ok"):
+            return msg_id
+        # Fallback to plain text if markdown formatting failed
+        res_plain = await send_tg_request("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": text.replace("*", "").replace("_", "").replace("`", ""),
+            "reply_markup": reply_markup
+        })
+        if res_plain and res_plain.get("ok"):
+            return msg_id
+        # If edit failed (e.g. message deleted by user), clear and send new
+        active_bot_messages.pop(chat_id, None)
+
+    res = await send_tg_request("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "reply_markup": reply_markup
+    })
+    if res and res.get("ok"):
+        new_id = res["result"]["message_id"]
+        active_bot_messages[chat_id] = new_id
+        return new_id
+    elif not (res and res.get("ok")):
+        res_plain = await send_tg_request("sendMessage", {
+            "chat_id": chat_id,
+            "text": text.replace("*", "").replace("_", "").replace("`", ""),
+            "reply_markup": reply_markup
+        })
+        if res_plain and res_plain.get("ok"):
+            new_id = res_plain["result"]["message_id"]
+            active_bot_messages[chat_id] = new_id
+            return new_id
+    return None
 
 def is_admin_user(tg_id: int) -> bool:
     if config.ADMIN_TG_ID and tg_id == config.ADMIN_TG_ID:
@@ -259,9 +312,8 @@ def build_task_detail_text(task: dict) -> str:
         f"Status: *{badge}*\n"
         f"Created by: `@{task['created_by']}` on `{task['created_at'][:16].replace('T', ' ')}`\n"
     )
-    if database.is_ai_mode():
-        ai_stat = "✅ Allowed (Autonomous Agent)" if task.get("ai_enabled", 0) else "❌ Disabled"
-        text += f"🤖 *AI Agent:* {ai_stat}\n"
+    ai_stat = "✅ Разрешен (Autonomous Agent)" if task.get("ai_enabled", 0) else "❌ Выключен"
+    text += f"🤖 *AI Agent:* {ai_stat}\n"
 
     if task.get("assignee"):
         text += f"Taken by: `@{task['assignee']}`\n"
@@ -313,9 +365,9 @@ def build_task_keyboard(task: dict, current_user: str) -> dict:
     if action_row:
         buttons.append(action_row)
 
-    if database.is_ai_mode() and status == config.STATUS_OPEN:
+    if status == config.STATUS_OPEN:
         ai_on = bool(task.get("ai_enabled", 0))
-        btn_text = "🤖 AI: ✅ Enabled (Tap to Disable)" if ai_on else "🤖 AI: ❌ Disabled (Tap to Enable)"
+        btn_text = "🤖 AI: ✅ Включен (Выключить)" if ai_on else "🤖 AI: ❌ Выключен (Разрешить нейронке)"
         buttons.append([{"text": btn_text, "callback_data": f"act:ai_toggle:{task_id}"}])
 
     buttons.append([
@@ -524,6 +576,9 @@ async def handle_callback_query(cq: dict):
     username = config.TG_USER_MAP[tg_id]
     chat_id = message["chat"]["id"] if message else tg_id
     message_id = message["message_id"] if message else None
+
+    if message_id:
+        active_bot_messages[chat_id] = message_id
 
     # Acknowledge callback immediately
     await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id})
@@ -1113,129 +1168,152 @@ async def handle_callback_query(cq: dict):
 async def handle_incoming_message(msg: dict):
     from_user = msg.get("from", {})
     tg_id = from_user.get("id")
-    chat_id = msg.get("chat", {}).get("id", tg_id)
-    text = msg.get("text", "").strip()
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id", tg_id)
+    chat_type = chat.get("type", "private")
+    user_msg_id = msg.get("message_id")
+    raw_text = msg.get("text", "")
+    caption = msg.get("caption", "")
+    full_text = (raw_text or caption).strip()
 
-    # Check authorization
-    if tg_id not in config.TG_USER_MAP:
+    # Look up username from TG_USER_MAP or database
+    username = config.TG_USER_MAP.get(tg_id)
+    if not username:
+        for u in database.get_all_users():
+            if u["telegram_id"] == tg_id:
+                username = u["username"]
+                break
+
+    # 1. Group / Supergroup message handling OR bot mention (@tasksboard67bot)
+    bot_mention = f"@{BOT_USERNAME.lower()}"
+    has_mention = bot_mention in full_text.lower()
+
+    if chat_type in ["group", "supergroup"] or has_mention:
+        if not has_mention:
+            return  # In group chats, ignore messages that don't address the bot
+
+        # Check if user is in our allowed user list
+        if not username:
+            logger.info(f"Group mention ignored from unauthorized user tg_id={tg_id}")
+            return
+
+        # User is authorized! Clean up the message (remove @botusername)
+        clean_text = re.sub(rf"(?i)@{re.escape(BOT_USERNAME)}\b", "", full_text).strip()
+        if not clean_text:
+            await send_tg_request("sendMessage", {
+                "chat_id": chat_id,
+                "reply_to_message_id": user_msg_id,
+                "text": f"ℹ️ Чтобы создать задачу, укажите ее описание:\n`@{BOT_USERNAME} сделать вот такую таску`",
+                "parse_mode": "Markdown"
+            })
+            return
+
+        lines = clean_text.split("\n", 1)
+        title = lines[0].strip()
+        desc = lines[1].strip() if len(lines) > 1 else ""
+        if not title:
+            title = "Untitled Task"
+
+        # Save task directly into Open with ai_enabled=0 (without AI permission)
+        task = database.create_task(title=title, description=desc, created_by=username, ai_enabled=0)
+        
+        reply_text = (
+            f"📥 *Задача #{task['id']} добавлена в Open!*\n\n"
+            f"📌 *{task['title']}*\n"
+            f"👤 Автор: `@{username}`\n"
+            f"🤖 AI: `❌ Без разрешения на нейронку`\n\n"
+            f"_Задача создана в открытых тасках._"
+        )
+        await send_tg_request("sendMessage", {
+            "chat_id": chat_id,
+            "reply_to_message_id": user_msg_id,
+            "text": reply_text,
+            "parse_mode": "Markdown"
+        })
+        return
+
+    # 2. Private Chat Handling (Direct interaction with the bot)
+    if not username:
         await send_tg_request("sendMessage", {
             "chat_id": chat_id,
             "text": f"⛔ Access Denied. Your Telegram ID ({tg_id}) is not authorized to access this Kanban Board."
         })
         return
 
-    username = config.TG_USER_MAP[tg_id]
     state_info = user_states.get(tg_id)
+    state = state_info.get("state") if state_info else None
 
-    # API Documentation quick commands
-    if text in ["/docs", "/api", "/help_api"]:
+    # Handle quick slash commands: delete user message and update persistent single bot message
+    if full_text in ["/docs", "/api", "/help_api"]:
         user_states.pop(tg_id, None)
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
         docs_text = build_api_docs_text("overview")
         reply_markup = build_api_docs_keyboard("overview")
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": docs_text,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(chat_id, docs_text, reply_markup)
         return
 
-    # Infrastructure / Servers quick commands
-    if text in ["/servers", "/cluster", "/hosts", "/infra", "/infrastructure"]:
+    if full_text in ["/servers", "/cluster", "/hosts", "/infra", "/infrastructure"]:
         user_states.pop(tg_id, None)
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
         servers_text = build_servers_text()
         reply_markup = build_servers_keyboard()
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": servers_text,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(chat_id, servers_text, reply_markup)
         return
 
-    # If user sent /start or /menu
-    if text in ["/start", "/menu"]:
+    if full_text in ["/start", "/menu"]:
         user_states.pop(tg_id, None)
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
         menu_text = build_main_menu_text(username, tg_id)
         reply_markup = build_main_menu_keyboard(tg_id)
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": menu_text,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(chat_id, menu_text, reply_markup)
         return
 
-    # If user sent free text and has no active state (e.g. "сделай чтото с сервером home")
-    if not state_info:
-        user_states[tg_id] = {"state": "pending_prompt", "prompt_text": text}
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🤖 Исполнить через AI Agent", "callback_data": "prompt:run_ai"}],
-                [{"text": "💬 Спросить AI-ассистента", "callback_data": "prompt:ask_ai"}],
-                [{"text": "📥 Добавить в Open (без AI)", "callback_data": "prompt:create_task"}],
-                [{"text": "❌ Отмена", "callback_data": "prompt:cancel"}]
-            ]
-        }
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": (
-                f"💬 *Получен запрос:*\n"
-                f"«_{text}_»\n\n"
-                f"Выберите, как обработать этот запрос:"
-            ),
-            "parse_mode": "Markdown",
-            "reply_markup": keyboard
-        })
-        return
-
-    # Handle active states
-    state = state_info.get("state")
-
+    # Active conversation states (rejection, comment, attachment, admin settings)
     if state == "waiting_rejection":
         task_id = state_info["task_id"]
         user_states.pop(tg_id, None)
-        ok, res_msg, updated_task = database.reject_task(task_id, username, text or "Rejected by reviewer")
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
+        ok, res_msg, updated_task = database.reject_task(task_id, username, full_text or "Rejected by reviewer")
         if ok and updated_task:
             task_text = build_task_detail_text(updated_task)
             reply_markup = build_task_keyboard(updated_task, username)
-            await send_tg_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"⚠️ *Task #{task_id} rejected and returned to Open!*\nReason: _{text}_\n\n" + task_text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
+            await update_or_send_main_message(
+                chat_id,
+                f"⚠️ *Task #{task_id} rejected and returned to Open!*\nReason: _{full_text}_\n\n" + task_text,
+                reply_markup
+            )
         else:
-            await send_tg_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"❌ Failed to reject task: {res_msg}",
-                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"task:{task_id}"}]]}
-            })
+            await update_or_send_main_message(
+                chat_id,
+                f"❌ Failed to reject task: {res_msg}",
+                {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"task:{task_id}"}]]}
+            )
+        return
 
     elif state == "waiting_comment":
         task_id = state_info["task_id"]
         user_states.pop(tg_id, None)
-        database.add_comment(task_id, username, text)
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
+        database.add_comment(task_id, username, full_text)
         updated_task = database.get_task(task_id)
         task_text = build_task_detail_text(updated_task)
         reply_markup = build_task_keyboard(updated_task, username)
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": f"💬 *Comment added to Task #{task_id}!*\n\n" + task_text,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(
+            chat_id,
+            f"💬 *Comment added to Task #{task_id}!*\n\n" + task_text,
+            reply_markup
+        )
+        return
 
     elif state == "waiting_attachment":
         task_id = state_info["task_id"]
         user_states.pop(tg_id, None)
-        # Check if message contains photo or document
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
         file_id = None
         orig_name = "attachment"
         mime = "application/octet-stream"
         
         if "photo" in msg:
-            # Get largest photo
             photo = msg["photo"][-1]
             file_id = photo["file_id"]
             orig_name = f"photo_{int(asyncio.get_event_loop().time())}.jpg"
@@ -1247,7 +1325,6 @@ async def handle_incoming_message(msg: dict):
             mime = doc.get("mime_type", "application/octet-stream")
 
         if file_id:
-            # Download file from Telegram Bot API
             file_info = await send_tg_request("getFile", {"file_id": file_id})
             if file_info and file_info.get("ok"):
                 file_path = file_info["result"]["file_path"]
@@ -1263,93 +1340,24 @@ async def handle_incoming_message(msg: dict):
                 updated_task = database.get_task(task_id)
                 task_text = build_task_detail_text(updated_task)
                 reply_markup = build_task_keyboard(updated_task, username)
-                await send_tg_request("sendMessage", {
-                    "chat_id": chat_id,
-                    "text": f"📎 *File attached successfully!*\n\n" + task_text,
-                    "parse_mode": "Markdown",
-                    "reply_markup": reply_markup
-                })
+                await update_or_send_main_message(
+                    chat_id,
+                    f"📎 *File attached successfully!*\n\n" + task_text,
+                    reply_markup
+                )
                 return
 
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": "❌ No photo or document received. Attachment cancelled.",
-            "reply_markup": {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"task:{task_id}"}]]}
-        })
-
-    elif state == "waiting_task_create":
-        user_states.pop(tg_id, None)
-        title = ""
-        description = ""
-        caption = msg.get("caption", "").strip()
-        
-        # Check text or photo/document
-        if text:
-            lines = text.split("\n", 1)
-            title = lines[0].strip()
-            if len(lines) > 1:
-                description = lines[1].strip()
-        elif caption:
-            lines = caption.split("\n", 1)
-            title = lines[0].strip()
-            if len(lines) > 1:
-                description = lines[1].strip()
-        else:
-            title = "Untitled Task"
-
-        try:
-            new_task = database.create_task(title, description, username)
-            task_id = new_task["id"]
-
-            # Check if attachment included with photo/doc
-            file_id = None
-            orig_name = "attachment"
-            mime = "application/octet-stream"
-            if "photo" in msg:
-                photo = msg["photo"][-1]
-                file_id = photo["file_id"]
-                orig_name = f"task_{task_id}_photo.jpg"
-                mime = "image/jpeg"
-            elif "document" in msg:
-                doc = msg["document"]
-                file_id = doc["file_id"]
-                orig_name = doc.get("file_name", "document")
-                mime = doc.get("mime_type", "application/octet-stream")
-
-            if file_id:
-                file_info = await send_tg_request("getFile", {"file_id": file_id})
-                if file_info and file_info.get("ok"):
-                    file_path = file_info["result"]["file_path"]
-                    download_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_path}"
-                    stored_name = f"{secrets.token_hex(16)}_{orig_name}"
-                    dest = config.UPLOAD_DIR / stored_name
-                    async with httpx.AsyncClient() as client:
-                        file_res = await client.get(download_url)
-                        with open(dest, "wb") as f:
-                            f.write(file_res.content)
-                    size = os.path.getsize(dest)
-                    database.add_attachment(task_id, username, orig_name, stored_name, size, mime)
-                    new_task = database.get_task(task_id)
-
-            task_text = build_task_detail_text(new_task)
-            reply_markup = build_task_keyboard(new_task, username)
-            await send_tg_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"🎉 *Task #{task_id} Created Successfully!*\n\n" + task_text,
-                "parse_mode": "Markdown",
-                "reply_markup": reply_markup
-            })
-        except Exception as e:
-            logger.error(f"Error creating task: {e}")
-            await send_tg_request("sendMessage", {
-                "chat_id": chat_id,
-                "text": f"❌ Failed to create task: {e}",
-                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Main Menu", "callback_data": "nav:main"}]]}
-            })
+        await update_or_send_main_message(
+            chat_id,
+            "❌ No photo or document received. Attachment cancelled.",
+            {"inline_keyboard": [[{"text": "🔙 Back", "callback_data": f"task:{task_id}"}]]}
+        )
+        return
 
     elif state == "waiting_add_user":
         user_states.pop(tg_id, None)
-        parts = text.split()
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
+        parts = full_text.split()
         if len(parts) >= 2 and parts[1].isdigit():
             new_u = parts[0].strip().lstrip("@").lower()
             new_id = int(parts[1])
@@ -1363,16 +1371,13 @@ async def handle_incoming_message(msg: dict):
 
         text_out = res_msg + "\n\n" + build_manage_users_text()
         reply_markup = build_manage_users_keyboard()
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": text_out,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(chat_id, text_out, reply_markup)
+        return
 
     elif state == "waiting_add_alert":
         user_states.pop(tg_id, None)
-        raw_val = text.strip()
+        await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
+        raw_val = full_text.strip()
         if raw_val.isdigit():
             new_alert_id = int(raw_val)
             added = database.add_alert_recipient(new_alert_id)
@@ -1387,12 +1392,72 @@ async def handle_incoming_message(msg: dict):
 
         text_out = res_msg + "\n\n" + build_manage_alerts_text()
         reply_markup = build_manage_alerts_keyboard()
-        await send_tg_request("sendMessage", {
-            "chat_id": chat_id,
-            "text": text_out,
-            "parse_mode": "Markdown",
-            "reply_markup": reply_markup
-        })
+        await update_or_send_main_message(chat_id, text_out, reply_markup)
+        return
+
+    # 3. Default Direct Message in Private Chat (no active state OR waiting_task_create)
+    # Directly creates a task for the AI agent (ai_enabled=1), deletes the user's message,
+    # and updates the bot's single persistent message displaying the saved task with a Back button.
+    user_states.pop(tg_id, None)
+    await send_tg_request("deleteMessage", {"chat_id": chat_id, "message_id": user_msg_id})
+
+    if not full_text:
+        return
+
+    lines = full_text.split("\n", 1)
+    title = lines[0].strip()
+    desc = lines[1].strip() if len(lines) > 1 else ""
+    if not title:
+        title = "Untitled Task"
+
+    # Create task with AI enabled
+    task = database.create_task(title=title, description=desc, created_by=username, ai_enabled=1)
+    task_id = task["id"]
+
+    # Check if photo or document was attached
+    file_id = None
+    orig_name = "attachment"
+    mime = "application/octet-stream"
+    if "photo" in msg:
+        photo = msg["photo"][-1]
+        file_id = photo["file_id"]
+        orig_name = f"task_{task_id}_photo.jpg"
+        mime = "image/jpeg"
+    elif "document" in msg:
+        doc = msg["document"]
+        file_id = doc["file_id"]
+        orig_name = doc.get("file_name", "document")
+        mime = doc.get("mime_type", "application/octet-stream")
+
+    if file_id:
+        file_info = await send_tg_request("getFile", {"file_id": file_id})
+        if file_info and file_info.get("ok"):
+            file_path = file_info["result"]["file_path"]
+            download_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_path}"
+            stored_name = f"{secrets.token_hex(16)}_{orig_name}"
+            dest = config.UPLOAD_DIR / stored_name
+            async with httpx.AsyncClient() as client:
+                file_res = await client.get(download_url)
+                with open(dest, "wb") as f:
+                    f.write(file_res.content)
+            size = os.path.getsize(dest)
+            database.add_attachment(task_id, username, orig_name, stored_name, size, mime)
+
+    saved_text = (
+        f"🤖 *Задача сохранена для AI-агента!*\n\n"
+        f"📌 *Task #{task['id']}:* {task['title']}\n"
+        f"👤 Автор: `@{username}`\n"
+        f"⚙️ Статус: `{task['status']}` | 🤖 AI: `✅ Разрешен`\n\n"
+        f"_AI-агент на сервере `andrii` подхватит выполнение задачи._"
+    )
+    saved_kb = {
+        "inline_keyboard": [
+            [{"text": f"📋 Открыть задачу #{task['id']}", "callback_data": f"task:{task['id']}"}],
+            [{"text": "🔙 Назад", "callback_data": "nav:main"}]
+        ]
+    }
+    await update_or_send_main_message(chat_id, saved_text, saved_kb)
+    return
 
 async def handle_guest_query(update: dict):
     """
@@ -1525,6 +1590,12 @@ async def start_telegram_bot_poller():
     offset = 0
     # Make sure webhook is removed so getUpdates works cleanly
     await send_tg_request("deleteWebhook", {"drop_pending_updates": False})
+
+    global BOT_USERNAME
+    me = await send_tg_request("getMe", {})
+    if me and me.get("ok"):
+        BOT_USERNAME = me["result"].get("username", BOT_USERNAME)
+        logger.info(f"Bot initialized as @{BOT_USERNAME}")
 
     while True:
         try:
