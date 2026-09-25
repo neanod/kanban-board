@@ -155,6 +155,9 @@ def build_main_menu_text(username: str, tg_id: int) -> str:
         f"• ✅ *Completed:* `{stats[config.STATUS_COMPLETED]}`\n"
         f"• 🤖 *AI Mode:* `{'ENABLED' if database.is_ai_mode() else 'DISABLED'}`\n"
         f"────────────────────────\n"
+        f"🌐 *Web Kanban (nip.io HTTPS):* https://89.36.161.118.nip.io:8445\n"
+        f"🌐 *Web Kanban (Plain IP HTTP):* http://89.36.161.118:8090\n"
+        f"────────────────────────\n"
         f"Select a column or action below:"
     )
     return text
@@ -202,6 +205,14 @@ def build_main_menu_keyboard(tg_id: int = 0) -> dict:
         [
             {"text": "➕ Create Task", "callback_data": "action:create_task"},
             {"text": "🖥 Servers & Cluster", "callback_data": "action:servers"}
+        ],
+        [
+            {"text": "🌐 Web Kanban (nip.io)", "url": "https://89.36.161.118.nip.io:8445"},
+            {"text": "🌐 Web (Plain IP)", "url": "http://89.36.161.118:8090"}
+        ],
+        [
+            {"text": "🎮 MC Agent (nip.io)", "url": "https://89.36.161.118.nip.io:8495"},
+            {"text": "🎮 MC Agent (Plain IP)", "url": "http://89.36.161.118:8095"}
         ],
         [
             {"text": "🔑 API Keys", "callback_data": "action:api_keys"},
