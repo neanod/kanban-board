@@ -120,6 +120,15 @@ class IncidentReportPayload(BaseModel):
     description: Optional[str] = Field("", max_length=5000)
     report: str = Field(..., min_length=1, max_length=50000)
     resolved: Optional[bool] = False
+    filename: Optional[str] = None
+
+class TaskReportPayload(BaseModel):
+    task_id: int
+    title: str = Field(..., max_length=300)
+    filename: str = Field(..., max_length=200)
+    report_content: str = Field(..., max_length=100000)
+    recipient: Optional[str] = "nikita"
+    status: Optional[str] = "success"
 
 class RejectTaskRequest(BaseModel):
     comment: str = Field(..., min_length=1, max_length=2000)
@@ -483,12 +492,37 @@ async def receive_incident_report(body: IncidentReportPayload, request: Request)
     sent_to = await bot.send_incident_alert_to_recipients(
         title=body.title,
         report_text=body.report,
-        resolved=bool(body.resolved)
+        resolved=bool(body.resolved),
+        report_filename=body.filename
     )
     return {
         "ok": True,
         "message": f"Incident report dispatched to {len(sent_to)} recipients",
         "sent_to": sent_to
+    }
+
+@app.post("/api/v1/ai/agent/task-report/{task_id}", tags=["AI Agent"])
+async def receive_task_report(task_id: int, body: TaskReportPayload, request: Request):
+    user_info = security.authenticate_request(request)
+    task = database.get_task(task_id)
+    recipient = body.recipient or (task.get("created_by") if task else "nikita")
+    status_label = "✅ Выполнено (отправлено на Review)" if body.status == "success" else "⚠️ Не выполнено (возвращено в Open)"
+    caption = (
+        f"📄 *Отчет ИИ-агента по задаче #{task_id}*\n"
+        f"📌 *{body.title}*\n"
+        f"Статус: *{status_label}*\n"
+        f"Полный отчет во вложенном файле `{body.filename}`."
+    )
+    sent = await bot.send_task_report_document(
+        username=recipient,
+        filename=body.filename,
+        report_content=body.report_content,
+        caption=caption
+    )
+    return {
+        "ok": True,
+        "message": f"Task report document dispatched: {sent}",
+        "sent": sent
     }
 
 @app.post("/api/v1/tasks/{task_id}/attachments", tags=["Attachments"])

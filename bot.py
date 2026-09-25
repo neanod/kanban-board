@@ -33,6 +33,29 @@ async def send_tg_request(method: str, payload: dict) -> Optional[dict]:
             logger.error(f"Error calling Telegram API {method}: {e}")
             return None
 
+async def send_tg_document(chat_id: int | str, filename: str, content: bytes, caption: str = "", mime_type: str = "text/markdown") -> Optional[dict]:
+    url = f"{TELEGRAM_API_BASE}/sendDocument"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            files = {
+                "document": (filename, content, mime_type)
+            }
+            data = {
+                "chat_id": str(chat_id),
+                "caption": caption[:1024] if caption else "",
+                "parse_mode": "Markdown"
+            }
+            resp = await client.post(url, data=data, files=files)
+            res_data = resp.json()
+            if not res_data.get("ok"):
+                data.pop("parse_mode", None)
+                resp = await client.post(url, data=data, files={"document": (filename, content, mime_type)})
+                res_data = resp.json()
+            return res_data
+        except Exception as e:
+            logger.error(f"Error calling Telegram API sendDocument: {e}")
+            return None
+
 async def update_or_send_main_message(chat_id: int, text: str, reply_markup: dict, parse_mode: str = "Markdown") -> Optional[int]:
     """
     Edits the bot's single persistent interactive message in the chat,
@@ -417,6 +440,11 @@ def build_task_keyboard(task: dict, current_user: str) -> dict:
         {"text": "📎 Attach File", "callback_data": f"act:attach_prompt:{task_id}"}
     ])
 
+    if task.get("attachments"):
+        buttons.append([
+            {"text": f"📥 Скачать отчет / файлы ({len(task['attachments'])})", "callback_data": f"act:get_files:{task_id}"}
+        ])
+
     buttons.append([
         {"text": "🗑 Delete Task", "callback_data": f"act:delete_prompt:{task_id}"}
     ])
@@ -744,6 +772,38 @@ async def handle_callback_query(cq: dict):
             "parse_mode": "Markdown",
             "reply_markup": {"inline_keyboard": [[{"text": "❌ Cancel", "callback_data": f"task:{task_id}"}]]}
         })
+
+    elif data.startswith("act:get_files:"):
+        task_id = int(data.split(":")[2])
+        task = database.get_task(task_id)
+        if not task or not task.get("attachments"):
+            await send_tg_request("answerCallbackQuery", {
+                "callback_query_id": cq_id,
+                "text": "У этой задачи нет файлов или отчетов.",
+                "show_alert": True
+            })
+            return
+        
+        await send_tg_request("answerCallbackQuery", {
+            "callback_query_id": cq_id,
+            "text": "Отправляю файлы задачи..."
+        })
+        for att in task["attachments"]:
+            file_path = config.UPLOAD_DIR / att["stored_filename"]
+            if file_path.is_file():
+                try:
+                    content = file_path.read_bytes()
+                    mime = att.get("mime_type") or "application/octet-stream"
+                    caption = f"📎 Задача #{task_id}: `{att['original_filename']}`"
+                    await send_tg_document(
+                        chat_id=chat_id,
+                        filename=att["original_filename"],
+                        content=content,
+                        caption=caption,
+                        mime_type=mime
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send attachment {att['stored_filename']} to chat {chat_id}: {e}")
 
     elif data.startswith("act:delete_prompt:"):
         task_id = int(data.split(":")[2])
@@ -1506,7 +1566,7 @@ async def handle_guest_query(update: dict):
     }
     await send_tg_request("answerGuestQuery", result_payload)
 
-async def send_incident_alert_to_recipients(title: str, report_text: str, resolved: bool = False) -> list:
+async def send_incident_alert_to_recipients(title: str, report_text: str, resolved: bool = False, report_filename: Optional[str] = None) -> list:
     import datetime
     recipients = database.get_alert_recipients()
     status_emoji = "✅ [RESOLVED]" if resolved else "🚨 [ALERT: METRIC DROP DETECTED]"
@@ -1524,27 +1584,59 @@ async def send_incident_alert_to_recipients(title: str, report_text: str, resolv
         full_text = full_text[:3950] + "\n\n...(report truncated)"
 
     sent = []
+    report_bytes = report_text.encode("utf-8")
+    doc_filename = report_filename or f"incident_report_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.md"
+    caption = f"{status_emoji} 🤖 Отчет инцидента: {title[:120]}"
+
     for r_id in recipients:
         res = await send_tg_request("sendMessage", {
             "chat_id": r_id,
             "text": full_text,
             "parse_mode": "Markdown"
         })
-        if res and res.get("ok"):
-            sent.append(r_id)
-        else:
+        if not (res and res.get("ok")):
             # Fallback to plain text if markdown formatting has unmatched tags
             try:
                 plain_body = f"{status_emoji}\nPixabay Farm Autonomous Incident Report\nTime: {now_str}\nIssue: {title}\n------------------------\n\n{report_text.strip()[:3800]}"
-                res2 = await send_tg_request("sendMessage", {
+                await send_tg_request("sendMessage", {
                     "chat_id": r_id,
                     "text": plain_body
                 })
-                if res2 and res2.get("ok"):
-                    sent.append(r_id)
             except Exception as e:
                 logger.error(f"Failed to send incident alert to {r_id}: {e}")
+
+        # Also send full markdown file directly to the recipient
+        try:
+            doc_res = await send_tg_document(r_id, doc_filename, report_bytes, caption, mime_type="text/markdown")
+            if doc_res and doc_res.get("ok") and r_id not in sent:
+                sent.append(r_id)
+        except Exception as e:
+            logger.error(f"Failed to send incident report document to {r_id}: {e}")
+
+        if r_id not in sent and res and res.get("ok"):
+            sent.append(r_id)
     return sent
+
+async def send_task_report_document(username: str, filename: str, report_content: str, caption: str = "") -> bool:
+    """
+    Sends an autonomous agent task report (.md document) directly to the Telegram user.
+    """
+    tg_id = config.USERNAME_TO_TG.get(username)
+    if not tg_id:
+        users = database.get_all_users()
+        for u in users:
+            if u["username"] == username:
+                tg_id = u["telegram_id"]
+                break
+    if not tg_id:
+        tg_id = config.ADMIN_TG_ID
+    if not tg_id:
+        logger.warning(f"Could not find Telegram ID for user: {username}")
+        return False
+
+    content_bytes = report_content.encode("utf-8")
+    res = await send_tg_document(tg_id, filename, content_bytes, caption, mime_type="text/markdown")
+    return bool(res and res.get("ok"))
 
 async def send_ai_chat_response_to_user(username: str, response_text: str) -> bool:
     """

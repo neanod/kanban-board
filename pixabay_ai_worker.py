@@ -214,6 +214,49 @@ Answer the user's question concisely, professionally, and accurately based on th
     api_request("POST", f"/api/v1/ai/agent/chat-response/{query_id}", data={"response": response_text})
     logger.info(f"Completed AI Web Chat query #{query_id}")
 
+def extract_final_report(output: str) -> str:
+    """
+    Extracts the clean markdown final report from agy stdout.
+    Strips intermediate thoughts, planner steps, and execution announcements
+    such as 'I am waiting for execution results', 'I have launched...', etc.
+    """
+    if not output:
+        return ""
+    
+    # 1. Look for explicit TASK_RESULT delimiter
+    report = ""
+    if "TASK_RESULT: SUCCESS" in output:
+        parts = output.split("TASK_RESULT: SUCCESS", 1)
+        report = parts[1].strip()
+    elif "TASK_RESULT: FAILED" in output:
+        parts = output.split("TASK_RESULT: FAILED", 1)
+        report = parts[1].strip()
+    else:
+        report = output.strip()
+    
+    # 2. Filter out any remaining intermediate agent thinking / tool announcement lines
+    cleaned_lines = []
+    ignorable_prefixes = (
+        "i am waiting",
+        "waiting for",
+        "i have launched",
+        "i am currently running",
+        "i am performing",
+        "i will now run",
+        "i will run",
+        "running tests now",
+        "executing checks",
+        "task_result:",
+    )
+    for line in report.splitlines():
+        line_strip = line.strip().lower()
+        if any(line_strip.startswith(p) for p in ignorable_prefixes):
+            continue
+        cleaned_lines.append(line)
+    
+    clean_text = "\n".join(cleaned_lines).strip()
+    return clean_text if clean_text else report
+
 def process_task(task: Dict[str, Any]):
     task_id = task["id"]
     title = task["title"]
@@ -246,12 +289,15 @@ Description:
 
 STRICT REQUIREMENTS:
 1. Thoroughly investigate what needs to be done. If the task relates to a specific server (e.g. "home", "russia", "neanod", "nikita", "vpn", "latvia", "шкаф", "kiyv", "andrii", "dmitry"), use your configured SSH access (`ssh home ...`, `ssh vpn ...`, `ssh dmitry ...`, or local commands) to inspect, execute, or manage operations on that server.
-2. TESTING IS MANDATORY: You MUST run and verify relevant test suites, scripts, or status checks to confirm everything works as expected.
+2. TESTING IS MANDATORY: You MUST run and verify relevant test suites, scripts, or status checks to confirm everything works as expected BEFORE finishing.
 3. System service reboots, process restarts, or temporary network resets are EXPECTED standard operations in this environment. DO NOT consider them errors.
-4. When finished:
-   - If ALL tests pass and the implementation is complete and verified, output:
+4. STRICT REPORTING RULES:
+   - Perform all research, debugging, changes, and testing first.
+   - When and ONLY when ALL actions and test verifications are completely finished and verified:
+     If successful, output EXACTLY:
      TASK_RESULT: SUCCESS
-     Followed by a concise bulleted summary of changes made and test outputs.
+     Followed immediately by your complete final report in GitHub-flavored Markdown.
+     CRITICAL: Do NOT output preliminary announcements like "I will now run tests", "I have launched checks", or "Waiting for results" after TASK_RESULT: SUCCESS. Everything after TASK_RESULT: SUCCESS must be the clean, finished Markdown report summarizing what was done, key diagnostic findings, and proof that tests succeeded.
    - If you are completely unable to solve the task or hit an insurmountable barrier, output:
      TASK_RESULT: FAILED
      Followed by a detailed technical root-cause explanation of what failed and what was tried.
@@ -262,32 +308,85 @@ STRICT REQUIREMENTS:
     output = stdout.strip()
 
     is_success = ("TASK_RESULT: SUCCESS" in output) and (retcode == 0)
-    is_failed = ("TASK_RESULT: FAILED" in output) or (retcode != 0)
+    clean_report = extract_final_report(output)
+    now_utc = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
 
     if is_success:
         logger.info(f"Task #{task_id} successfully completed and verified by AI Agent!")
         
-        # Post summary comment
-        comment_content = f"✅ **AI Autonomous Execution Succeeded**\n\n{output}"
-        # Truncate if excessively long
-        if len(comment_content) > 9500:
-            comment_content = comment_content[:9500] + "\n...(truncated)"
+        # 1. Generate full markdown report
+        report_filename = f"task_{task_id}_report.md"
+        full_report_content = f"""# Autonomous AI Agent Task Execution Report
+**Task #{task_id}:** {title}  
+**Date:** {now_utc}  
+**Status:** ✅ COMPLETED & VERIFIED  
+**Executor:** AI Autonomous Agent (`{MODEL_NAME}`) on server `andrii`  
+**Creator:** @{created_by}  
+
+---
+
+## 1. Task Objective & Context
+{description or 'No description provided.'}
+
+---
+
+## 2. Technical Execution & Verification Report
+{clean_report}
+
+---
+
+## 3. Verification Summary
+- All tests, diagnostic scripts, and status checks were executed and confirmed passing.
+- Submitted for final human review.
+"""
+
+        # 2. Upload .md report as attachment to Kanban card
+        files = {
+            "file": (report_filename, full_report_content.encode("utf-8"), "text/markdown")
+        }
+        att_res = api_request("POST", f"/api/v1/tasks/{task_id}/attachments", files=files)
+        if att_res:
+            logger.info(f"Uploaded completion report attachment `{report_filename}` for task #{task_id}")
+
+        # 3. Post concise summary comment on Kanban card (without prelim chatter)
+        summary_snippet = clean_report
+        if len(summary_snippet) > 2000:
+            summary_snippet = summary_snippet[:2000] + "\n\n...(см. полный отчет во вложенном файле)"
+        
+        comment_content = (
+            f"✅ **AI Autonomous Execution Succeeded & Verified**\n\n"
+            f"{summary_snippet}\n\n"
+            f"📄 _Полный технический отчет сохранен в прикрепленном файле:_ `{report_filename}`"
+        )
         api_request("POST", f"/api/v1/tasks/{task_id}/comments", data={"content": comment_content})
 
-        # Submit for review
+        # 4. Submit for review
         api_request("POST", f"/api/v1/tasks/{task_id}/submit-review")
         logger.info(f"Task #{task_id} submitted for human review.")
+
+        # 5. Dispatch .md report directly to creator in Telegram
+        api_request("POST", f"/api/v1/ai/agent/task-report/{task_id}", data={
+            "task_id": task_id,
+            "title": title,
+            "filename": report_filename,
+            "report_content": full_report_content,
+            "recipient": created_by,
+            "status": "success"
+        })
 
     else:
         logger.warning(f"Task #{task_id} could not be completed by AI Agent. Generating failure report...")
         
-        # Generate markdown failure report
-        failure_report_content = f"""# Autonomous AI Agent Failure Report
+        # 1. Generate markdown failure report
+        report_filename = f"task_{task_id}_failure_report.md"
+        full_report_content = f"""# Autonomous AI Agent Task Failure Report
 **Task #{task_id}:** {title}  
-**Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  
+**Date:** {now_utc}  
+**Status:** ⚠️ FAILED / GAVE UP  
 **Host:** server `andrii`  
 **Model:** `{MODEL_NAME}`  
 **Project Path:** `{PROJECT_DIR}`  
+**Creator:** @{created_by}  
 
 ---
 
@@ -300,35 +399,45 @@ STRICT REQUIREMENTS:
 The autonomous agent encountered obstacles preventing successful completion of this task:
 
 ```text
-{output if output else stderr}
+{clean_report if clean_report else (output if output else stderr)}
 ```
 
 ---
 
 ## 3. Standard Environment Diagnostics & Notes
 - Server/daemon service resets occurred as expected during tests.
+- AI execution has been disabled on this task to prevent retry loops.
 - Re-run or manual human intervention is recommended.
 """
-        # Upload .md report as attachment
-        filename = f"task_{task_id}_failure_report.md"
+        # 2. Upload .md report as attachment
         files = {
-            "file": (filename, failure_report_content.encode("utf-8"), "text/markdown")
+            "file": (report_filename, full_report_content.encode("utf-8"), "text/markdown")
         }
         att_res = api_request("POST", f"/api/v1/tasks/{task_id}/attachments", files=files)
         if att_res:
-            logger.info(f"Uploaded failure report attachment for task #{task_id}")
+            logger.info(f"Uploaded failure report attachment `{report_filename}` for task #{task_id}")
 
-        # Post comment
+        # 3. Post comment
         api_request("POST", f"/api/v1/tasks/{task_id}/comments", data={
-            "content": f"⚠️ AI Agent was unable to complete this task and gave up. A detailed failure report `{filename}` has been uploaded as an attachment. Returning task to Open."
+            "content": f"⚠️ AI Agent was unable to complete this task and gave up.\nA detailed failure report `{report_filename}` has been uploaded as an attachment.\nReturning task to Open."
         })
 
-        # Disable AI execution on this task to prevent retry loops
+        # 4. Disable AI execution on this task to prevent retry loops
         api_request("POST", f"/api/v1/tasks/{task_id}/ai-toggle")
 
-        # Release task back to Open
+        # 5. Release task back to Open
         api_request("POST", f"/api/v1/tasks/{task_id}/release")
         logger.info(f"Task #{task_id} released back to Open.")
+
+        # 6. Dispatch .md failure report directly to creator in Telegram
+        api_request("POST", f"/api/v1/ai/agent/task-report/{task_id}", data={
+            "task_id": task_id,
+            "title": title,
+            "filename": report_filename,
+            "report_content": full_report_content,
+            "recipient": created_by,
+            "status": "failed"
+        })
 
 def check_farm_target_metrics() -> Tuple[bool, str, Dict[str, Any]]:
     """
@@ -574,14 +683,30 @@ YOUR MISSION:
         logger.warning("Report stated RESOLVED but pixabay_farm.py is not running. Treating as not fully resolved.")
         is_resolved = False
 
+    inc_filename = f"task_{task_id}_incident_report.md" if task_id else f"incident_report_{int(time.time())}.md"
+    fail_filename = f"task_{task_id}_incident_failure_report.md" if task_id else f"incident_failure_{int(time.time())}.md"
+
     # Step 4: Handle task resolution and update board
     if is_resolved:
         logger.info(f"✅ Fix verified! AI Agent resolved incident for task #{task_id}.")
         if task_id:
+            # Upload markdown report as attachment
+            files = {
+                "file": (inc_filename, report_text.encode("utf-8"), "text/markdown")
+            }
+            att_res = api_request("POST", f"/api/v1/tasks/{task_id}/attachments", files=files)
+            if att_res:
+                logger.info(f"Uploaded incident report attachment `{inc_filename}` for task #{task_id}")
+
             # Post summary comment
-            comment_content = f"✅ **Incident Remediated & Verified by AI Agent**\n\n{report_text}"
-            if len(comment_content) > 9500:
-                comment_content = comment_content[:9500] + "\n...(truncated)"
+            summary_snippet = report_text
+            if len(summary_snippet) > 2000:
+                summary_snippet = summary_snippet[:2000] + "\n...(см. полный отчет в прикрепленном файле)"
+            comment_content = (
+                f"✅ **Incident Remediated & Verified by AI Agent**\n\n"
+                f"{summary_snippet}\n\n"
+                f"📄 _Полный технический отчет сохранен в прикрепленном файле:_ `{inc_filename}`"
+            )
             api_request("POST", f"/api/v1/tasks/{task_id}/comments", data={"content": comment_content})
 
             # Move directly to Completed
@@ -626,17 +751,16 @@ The autonomous agent attempted diagnosis and recovery but was unable to resolve 
 - Check proxy status on ports 10811..10818.
 - Verify browser / captcha constraints or restart user services.
 """
-            filename = f"task_{task_id}_incident_failure_report.md"
             files = {
-                "file": (filename, failure_report_content.encode("utf-8"), "text/markdown")
+                "file": (fail_filename, failure_report_content.encode("utf-8"), "text/markdown")
             }
             att_res = api_request("POST", f"/api/v1/tasks/{task_id}/attachments", files=files)
             if att_res:
-                logger.info(f"Uploaded failure report attachment `{filename}` for task #{task_id}")
+                logger.info(f"Uploaded failure report attachment `{fail_filename}` for task #{task_id}")
 
             # Post comment
             api_request("POST", f"/api/v1/tasks/{task_id}/comments", data={
-                "content": f"⚠️ AI Agent was unable to resolve this incident and gave up.\nA detailed failure report `{filename}` has been uploaded as an attachment.\nReturning task to Open for human investigation."
+                "content": f"⚠️ AI Agent was unable to resolve this incident and gave up.\nA detailed failure report `{fail_filename}` has been uploaded as an attachment.\nReturning task to Open for human investigation."
             })
 
             # Disable AI on this task to prevent re-pickup loop
@@ -657,7 +781,8 @@ The autonomous agent attempted diagnosis and recovery but was unable to resolve 
         "title": first_line,
         "description": reason,
         "report": report_text,
-        "resolved": is_resolved
+        "resolved": is_resolved,
+        "filename": inc_filename if is_resolved else fail_filename
     }
 
     logger.info("Dispatching incident report to Kanban API (/api/v1/ai/agent/incident-report)...")
