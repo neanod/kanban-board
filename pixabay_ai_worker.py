@@ -16,6 +16,7 @@ import secrets
 import logging
 import sqlite3
 import subprocess
+import threading
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional, Tuple, List
@@ -38,6 +39,7 @@ MODEL_NAME = "gemini-3.8-flash-medium"
 POLL_INTERVAL_SECONDS = 5
 METRICS_CHECK_INTERVAL = int(os.environ.get("METRICS_CHECK_INTERVAL", "60"))
 INCIDENT_COOLDOWN = int(os.environ.get("INCIDENT_COOLDOWN", "1800"))
+TASK_TIMEOUT = int(os.environ.get("TASK_TIMEOUT", "1800"))
 
 CLUSTER_SERVERS_CONTEXT = """
 CLUSTER INFRASTRUCTURE & SERVER TOPOLOGY:
@@ -132,9 +134,180 @@ def api_request(method: str, endpoint: str, data: Optional[Dict[str, Any]] = Non
         logger.error(f"Request failed for {method} {endpoint}: {e}")
         return None
 
-def run_agy(prompt: str, timeout: int = 600) -> Tuple[int, str, str]:
+def get_agy_conversation_diagnostics(start_time: float) -> Dict[str, Any]:
+    """
+    Scans the Antigravity conversation directory for the most recent run after start_time,
+    and extracts execution statistics, modified files, completed tool actions, test results,
+    and the last recorded step to provide full diagnostic transparency.
+    """
+    brain_dir = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+    if not os.path.isdir(brain_dir):
+        return {}
+
+    try:
+        conv_dirs = [
+            os.path.join(brain_dir, d) for d in os.listdir(brain_dir)
+            if os.path.isdir(os.path.join(brain_dir, d))
+        ]
+        if not conv_dirs:
+            return {}
+        conv_dirs.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+        
+        target_dir = conv_dirs[0]
+        # Only use if touched within 60s of start_time or later
+        if os.path.getmtime(target_dir) < (start_time - 60):
+            return {}
+            
+        trans_path = os.path.join(target_dir, ".system_generated", "logs", "transcript_full.jsonl")
+        if not os.path.exists(trans_path):
+            trans_path = os.path.join(target_dir, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.exists(trans_path):
+            return {}
+
+        total_steps = 0
+        actions = []
+        files_touched = set()
+        test_runs = []
+        last_thought = ""
+        last_content = ""
+        last_action = ""
+
+        with open(trans_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                total_steps += 1
+                stype = data.get("type")
+                if stype == "PLANNER_RESPONSE":
+                    t = data.get("thinking", "")
+                    if t:
+                        last_thought = t
+                    for tc in data.get("tool_calls", []):
+                        name = tc.get("name") or tc.get("function", {}).get("name") or "tool"
+                        args = tc.get("args") or tc.get("function", {}).get("arguments") or {}
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                pass
+                        summary = tc.get("toolSummary", "")
+                        if isinstance(args, dict):
+                            tf = args.get("TargetFile") or args.get("AbsolutePath")
+                            if tf:
+                                files_touched.add(tf)
+                            cmd = args.get("CommandLine")
+                            if not summary:
+                                summary = f"Run: {cmd[:60]}" if cmd else (f"File: {tf}" if tf else name)
+                        actions.append((name, summary))
+                        last_action = f"{name}: {summary}"
+                elif stype in ("GENERIC", "USER_INPUT"):
+                    c = data.get("content", "")
+                    if c:
+                        last_content = c
+                        if "Ran " in c and " tests in " in c:
+                            test_runs.append(c.strip())
+
+        return {
+            "conversation_id": os.path.basename(target_dir),
+            "total_steps": total_steps,
+            "total_actions": len(actions),
+            "files_touched": sorted(list(files_touched)),
+            "actions": actions,
+            "test_runs": test_runs,
+            "last_action": last_action,
+            "last_thought": last_thought,
+            "last_content": last_content[-600:] if last_content else "",
+        }
+    except Exception as e:
+        logger.error(f"Error extracting conversation diagnostics: {e}")
+        return {}
+
+def build_diagnostic_failure_report(task_id: Any, title: str, description: str, created_by: str,
+                                     clean_report: str, output: str, stderr: str,
+                                     diag: Dict[str, Any], timeout: int, is_incident: bool = False) -> str:
+    now_utc = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())
+    header_title = "Incident Remediation Failure Report" if is_incident else "Task Failure Report"
+    core_reason = clean_report if clean_report else (output if output else stderr)
+
+    diag_section = ""
+    if diag and diag.get("total_steps", 0) > 0:
+        total_steps = diag.get("total_steps", 0)
+        total_actions = diag.get("total_actions", 0)
+        files = diag.get("files_touched", [])
+        files_str = "\n".join(f"- `{f}`" for f in files) if files else "- None recorded"
+        
+        recent_actions = diag.get("actions", [])[-10:]
+        actions_str = "\n".join(f"{i+1}. **{a[0]}**: {a[1]}" for i, a in enumerate(recent_actions)) if recent_actions else "- None"
+
+        test_runs = diag.get("test_runs", [])
+        tests_str = ""
+        if test_runs:
+            tests_str = f"\n\n### Executed Test Results\n```text\n{test_runs[-1][:1000]}\n```"
+
+        last_action = diag.get("last_action", "N/A")
+        last_out = diag.get("last_content", "")
+        last_out_block = f"\n\n### Last Console / Tool Output\n```text\n{last_out}\n```" if last_out else ""
+
+        progress_notice = ""
+        if test_runs and "OK" in test_runs[-1]:
+            progress_notice = "\n> [!NOTE]\n> **Code changes and automated tests actually succeeded!** The process timed out before returning the final completion token."
+
+        diag_section = f"""### Execution Trajectory & Diagnostic Telemetry
+{progress_notice}
+- **Total Steps Performed:** {total_steps}
+- **Total Tool Actions Executed:** {total_actions}
+- **Last Action Before Stoppage:** `{last_action}`
+- **Files Modified / Created:**
+{files_str}
+
+### Recent Execution Steps
+{actions_str}{tests_str}{last_out_block}
+"""
+
+    report_content = f"""# Autonomous AI Agent {header_title}
+**Task #{task_id}:** {title}  
+**Date:** {now_utc}  
+**Status:** ⚠️ FAILED / TIMED OUT  
+**Host:** server `andrii`  
+**Model:** `{MODEL_NAME}`  
+**Project Path:** `{PROJECT_DIR}`  
+**Creator:** @{created_by}  
+
+---
+
+## 1. Problem Description / Task Objective
+{description or 'No description provided.'}
+
+---
+
+## 2. Technical Reasons & Failure Diagnosis
+The autonomous agent encountered obstacles or timed out:
+
+```text
+{core_reason.strip() if core_reason else 'Execution timed out.'}
+```
+
+{diag_section}
+
+---
+
+## 3. Standard Environment Diagnostics & Notes
+- AI execution has been disabled on this task to prevent automated retry loops.
+- All code changes, test files, and transcripts on `andrii` are preserved for manual inspection or resumption.
+- Re-run or human review is recommended.
+"""
+    return report_content
+
+def run_agy(prompt: str, timeout: int = 1800) -> Tuple[int, str, str, Dict[str, Any]]:
     """
     Executes antigravity-cli ('agy') non-interactively with gemini-3.8-flash-medium.
+    Streams output in real-time and recovers execution trajectory & transcript diagnostics
+    even if timed out.
     """
     cmd = [
         "agy",
@@ -143,23 +316,64 @@ def run_agy(prompt: str, timeout: int = 600) -> Tuple[int, str, str]:
         "--dangerously-skip-permissions"
     ]
     logger.info(f"Invoking agy in {PROJECT_DIR} (Model: {MODEL_NAME}, timeout: {timeout}s)...")
+    start_time = time.time()
+    
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=PROJECT_DIR,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout
+            bufsize=1,
+            preexec_fn=os.setsid
         )
-        return proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as e:
-        logger.error(f"agy execution timed out after {timeout} seconds")
-        stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-        return -1, stdout, stderr + f"\nTimed out after {timeout} seconds"
+        
+        stdout_chunks = []
+        stderr_chunks = []
+
+        def read_stream(stream, chunks):
+            try:
+                for line in iter(stream.readline, ''):
+                    chunks.append(line)
+            except Exception:
+                pass
+            finally:
+                stream.close()
+
+        t_out = threading.Thread(target=read_stream, args=(proc.stdout, stdout_chunks), daemon=True)
+        t_err = threading.Thread(target=read_stream, args=(proc.stderr, stderr_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        try:
+            proc.wait(timeout=timeout)
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks)
+            diag = get_agy_conversation_diagnostics(start_time)
+            return proc.returncode, stdout, stderr, diag
+        except subprocess.TimeoutExpired:
+            logger.error(f"agy execution timed out after {timeout} seconds. Terminating process group...")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            t_out.join(timeout=2)
+            t_err.join(timeout=2)
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks) + f"\nTimed out after {timeout} seconds"
+            diag = get_agy_conversation_diagnostics(start_time)
+            return -1, stdout, stderr, diag
+            
     except Exception as e:
         logger.error(f"Failed to spawn agy process: {e}")
-        return -2, "", str(e)
+        diag = get_agy_conversation_diagnostics(start_time)
+        return -2, "", str(e), diag
 
 def process_chat_query(query: Dict[str, Any]):
     query_id = query["id"]
@@ -201,7 +415,7 @@ User Question / Command:
 Instruction:
 Answer the user's question concisely, professionally, and accurately based on the current codebase, infrastructure status, and server context.
 """
-    retcode, stdout, stderr = run_agy(agent_prompt, timeout=180)
+    retcode, stdout, stderr, diag = run_agy(agent_prompt, timeout=180)
     
     # Extract response
     response_text = stdout.strip()
@@ -304,7 +518,7 @@ STRICT REQUIREMENTS:
 """
 
     # Step 4: Run agy
-    retcode, stdout, stderr = run_agy(execution_prompt, timeout=900)
+    retcode, stdout, stderr, diag = run_agy(execution_prompt, timeout=TASK_TIMEOUT)
     output = stdout.strip()
 
     is_success = ("TASK_RESULT: SUCCESS" in output) and (retcode == 0)
@@ -379,36 +593,18 @@ STRICT REQUIREMENTS:
         
         # 1. Generate markdown failure report
         report_filename = f"task_{task_id}_failure_report.md"
-        full_report_content = f"""# Autonomous AI Agent Task Failure Report
-**Task #{task_id}:** {title}  
-**Date:** {now_utc}  
-**Status:** ⚠️ FAILED / GAVE UP  
-**Host:** server `andrii`  
-**Model:** `{MODEL_NAME}`  
-**Project Path:** `{PROJECT_DIR}`  
-**Creator:** @{created_by}  
-
----
-
-## 1. Problem Description
-{description or 'No description provided.'}
-
----
-
-## 2. Technical Reasons & Failure Diagnosis
-The autonomous agent encountered obstacles preventing successful completion of this task:
-
-```text
-{clean_report if clean_report else (output if output else stderr)}
-```
-
----
-
-## 3. Standard Environment Diagnostics & Notes
-- Server/daemon service resets occurred as expected during tests.
-- AI execution has been disabled on this task to prevent retry loops.
-- Re-run or manual human intervention is recommended.
-"""
+        full_report_content = build_diagnostic_failure_report(
+            task_id=task_id,
+            title=title,
+            description=description,
+            created_by=created_by,
+            clean_report=clean_report,
+            output=output,
+            stderr=stderr,
+            diag=diag,
+            timeout=TASK_TIMEOUT,
+            is_incident=False
+        )
         # 2. Upload .md report as attachment
         files = {
             "file": (report_filename, full_report_content.encode("utf-8"), "text/markdown")
@@ -653,7 +849,7 @@ YOUR MISSION:
    ===INCIDENT_REPORT_END===
 """
 
-    retcode, stdout, stderr = run_agy(prompt, timeout=900)
+    retcode, stdout, stderr, diag = run_agy(prompt, timeout=TASK_TIMEOUT)
     output = stdout.strip()
 
     # Extract report
@@ -723,34 +919,18 @@ YOUR MISSION:
         logger.warning(f"❌ AI Agent gave up or could not resolve incident for task #{task_id}. Reverting task to Open...")
         if task_id:
             # Upload markdown failure report
-            failure_report_content = f"""# Autonomous AI Agent Incident Remediation Failure Report
-**Task #{task_id}:** {task_title}  
-**Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  
-**Host:** server `andrii`  
-**Model:** `{MODEL_NAME}`  
-**Project Path:** `{PROJECT_DIR}`  
-
----
-
-## 1. Incident Trigger
-{reason}
-
----
-
-## 2. Technical Reasons & Failure Diagnosis
-The autonomous agent attempted diagnosis and recovery but was unable to resolve the incident:
-
-```text
-{report_text if report_text else (output if output else stderr)}
-```
-
----
-
-## 3. Recommended Actions for Human Engineers
-- Inspect logs: `{PROJECT_DIR}/logs/liker_andrii.log`
-- Check proxy status on ports 10811..10818.
-- Verify browser / captcha constraints or restart user services.
-"""
+            failure_report_content = build_diagnostic_failure_report(
+                task_id=task_id,
+                title=task_title,
+                description=reason,
+                created_by="ai agent",
+                clean_report=report_text if report_text and "## Automated Farm Diagnostic" not in report_text else "",
+                output=output,
+                stderr=stderr,
+                diag=diag,
+                timeout=TASK_TIMEOUT,
+                is_incident=True
+            )
             files = {
                 "file": (fail_filename, failure_report_content.encode("utf-8"), "text/markdown")
             }
