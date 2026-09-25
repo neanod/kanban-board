@@ -75,3 +75,35 @@ NICKNAME_COOKIE_NAME = "kanban_nickname"
 # Rate Limiting
 LOGIN_RATE_LIMIT = 5       # Max 5 attempts per minute per IP
 GLOBAL_RATE_LIMIT = 120    # Max 120 requests per minute per IP
+
+# Cluster Infrastructure & Server Aliases
+CLUSTER_SERVERS = {
+    "home": {
+        "name": "home",
+        "aliases": ["russia", "neanod", "nikita"],
+        "description": "Основной компьютер пользователя (этот компьютер 'home')",
+        "ip": os.environ.get("SERVER_HOME_IP", "10.157.97.70"),
+        "ssh_host": "home"
+    },
+    "vpn": {
+        "name": "latvia / vpn",
+        "aliases": ["latvia", "vpn"],
+        "description": "Сервер 89.36.161.118 (хост канбан-доски и Telegram-бота)",
+        "ip": os.environ.get("SERVER_VPN_IP", "89.36.161.118"),
+        "ssh_host": "vpn"
+    },
+    "andrii": {
+        "name": "andrii",
+        "aliases": ["шкаф", "kiyv", "kyiv"],
+        "description": "Сервер andrii (Pixabay Farm, Minecraft, AI Worker daemon)",
+        "ip": os.environ.get("SERVER_ANDRII_IP", "10.157.97.4"),
+        "ssh_host": "andrii"
+    },
+    "dmitry": {
+        "name": "dmitry",
+        "aliases": ["dmitry"],
+        "description": "Воркер-нода dmitry",
+        "ip": os.environ.get("SERVER_DMITRY_IP", "10.157.97.182"),
+        "ssh_host": "dmitry"
+    }
+}

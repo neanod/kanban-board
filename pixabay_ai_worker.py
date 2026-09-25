@@ -39,6 +39,31 @@ POLL_INTERVAL_SECONDS = 5
 METRICS_CHECK_INTERVAL = int(os.environ.get("METRICS_CHECK_INTERVAL", "60"))
 INCIDENT_COOLDOWN = int(os.environ.get("INCIDENT_COOLDOWN", "1800"))
 
+CLUSTER_SERVERS_CONTEXT = """
+CLUSTER INFRASTRUCTURE & SERVER TOPOLOGY:
+You are deployed on server 'andrii' and have pre-configured passwordless SSH access to all cluster nodes defined in ~/.ssh/config:
+
+1. Server "home" (Aliases: "russia", "neanod", "nikita"):
+   - Primary user workstation / main PC ('home', ZeroTier IP 10.157.97.70).
+   - Reachable via command: `ssh home <command>` (or `ssh russia`, `ssh neanod`, `ssh nikita`).
+   - If a task or user asks to do something with "home" / "russia" / "neanod" / "nikita" (e.g. check status, run script, manage files, inspect services), execute commands via `ssh home <command>`.
+
+2. Server "latvia" (Aliases: "vpn"):
+   - External VPN & Kanban Board API host (IP 89.36.161.118, domain bebra1488.ru).
+   - Reachable via command: `ssh vpn <command>` (or `ssh latvia`).
+
+3. Server "andrii" (Aliases: "шкаф", "kiyv", "kyiv", localhost 127.0.0.1 / 10.157.97.4):
+   - THIS CURRENT LOCAL MACHINE where you are executing.
+   - Hosts Pixabay Farm cluster controller, Minecraft server, and this AI Worker daemon.
+   - Commands run locally here without ssh.
+
+4. Server "dmitry":
+   - Farm worker node (IP 10.157.97.182).
+   - Reachable via command: `ssh dmitry <command>`.
+
+When user requests involve server "home", "vpn", "andrii" ("шкаф"), or "dmitry", automatically recognize the target server and execute necessary commands using ssh or locally.
+"""
+
 RUNNING = True
 
 def handle_signal(sig, frame):
@@ -161,18 +186,20 @@ def process_chat_query(query: Dict[str, Any]):
 
     context_text = "\n".join(task_contexts) if task_contexts else "No specific tasks selected."
 
-    agent_prompt = f"""You are an autonomous AI coding assistant deployed on server 'andrii' working on the codebase in:
+    agent_prompt = f"""You are an autonomous AI coding assistant and systems specialist deployed on server 'andrii' working on:
 {PROJECT_DIR}
+
+{CLUSTER_SERVERS_CONTEXT}
 
 User: @{user}
 Context Tasks:
 {context_text}
 
-User Question:
+User Question / Command:
 {prompt}
 
 Instruction:
-Answer the user's question concisely, professionally, and accurately based on the current codebase, implementation status, and task context.
+Answer the user's question concisely, professionally, and accurately based on the current codebase, infrastructure status, and server context.
 """
     retcode, stdout, stderr = run_agy(agent_prompt, timeout=180)
     
@@ -207,7 +234,7 @@ def process_task(task: Dict[str, Any]):
     })
 
     # Step 3: Build autonomous task execution prompt
-    execution_prompt = f"""You are an autonomous senior software engineer working in:
+    execution_prompt = f"""You are an autonomous senior software engineer and systems administrator working on:
 {PROJECT_DIR}
 
 Task #{task_id}: {title}
@@ -215,9 +242,11 @@ Creator: @{created_by}
 Description:
 {description}
 
+{CLUSTER_SERVERS_CONTEXT}
+
 STRICT REQUIREMENTS:
-1. Thoroughly investigate the codebase and implement whatever code changes, scripts, or configurations are necessary to achieve the task requirements.
-2. TESTING IS MANDATORY: You MUST run and verify relevant test suites (pytest, python3 test_*.py, etc.) to confirm everything works as expected.
+1. Thoroughly investigate what needs to be done. If the task relates to a specific server (e.g. "home", "russia", "neanod", "nikita", "vpn", "latvia", "шкаф", "kiyv", "andrii", "dmitry"), use your configured SSH access (`ssh home ...`, `ssh vpn ...`, `ssh dmitry ...`, or local commands) to inspect, execute, or manage operations on that server.
+2. TESTING IS MANDATORY: You MUST run and verify relevant test suites, scripts, or status checks to confirm everything works as expected.
 3. System service reboots, process restarts, or temporary network resets are EXPECTED standard operations in this environment. DO NOT consider them errors.
 4. When finished:
    - If ALL tests pass and the implementation is complete and verified, output:
@@ -460,6 +489,8 @@ def handle_incident(reason: str, stats: Dict[str, Any]):
 
     prompt = f"""You are an autonomous Site Reliability Engineer and Senior Systems Specialist for the Pixabay Farm cluster located at:
 {PROJECT_DIR}
+
+{CLUSTER_SERVERS_CONTEXT}
 
 🚨 CRITICAL INCIDENT DETECTED (Kanban Task #{task_id if task_id else 'N/A'}):
 {reason}

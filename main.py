@@ -3,6 +3,7 @@ import os
 import shutil
 import secrets
 import mimetypes
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -20,6 +21,8 @@ import config
 import database
 import security
 import bot
+
+logger = logging.getLogger("kanban_app")
 
 # Initialize database
 database.init_db()
@@ -458,7 +461,13 @@ async def get_agent_pending_work(request: Request):
 @app.post("/api/v1/ai/agent/chat-response/{query_id}", tags=["AI Agent"])
 async def submit_agent_chat_response(query_id: int, body: AIChatResponsePayload, request: Request):
     user_info = security.authenticate_request(request)
+    query = database.get_chat_query(query_id)
     database.complete_chat_query(query_id, body.response, body.status or "done")
+    if query and query.get("user"):
+        try:
+            await bot.send_ai_chat_response_to_user(query["user"], body.response)
+        except Exception as e:
+            logger.error(f"Failed to forward chat response to telegram user: {e}")
     return {"ok": True, "message": "Response recorded"}
 
 @app.get("/api/v1/settings/alerts", tags=["Settings"])

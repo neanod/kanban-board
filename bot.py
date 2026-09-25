@@ -52,6 +52,35 @@ def build_main_menu_text(username: str, tg_id: int) -> str:
     )
     return text
 
+def build_servers_text() -> str:
+    lines = [
+        "🖥 *Инфраструктура кластера и алиасы серверов:*",
+        "────────────────────────"
+    ]
+    for s_key, s_data in config.CLUSTER_SERVERS.items():
+        aliases_str = ", ".join([f"`{a}`" for a in s_data["aliases"]])
+        aliases_line = f" (алиасы: {aliases_str})" if aliases_str else ""
+        lines.append(f"• 🔹 *{s_data['name']}*{aliases_line}:")
+        lines.append(f"  IP: `{s_data['ip']}` | SSH: `ssh {s_data['ssh_host']}`")
+        lines.append(f"  _{s_data['description']}_\n")
+    
+    lines.append("────────────────────────")
+    lines.append("🤖 *Управление через AI Agent:*")
+    lines.append("AI-агент на сервере `andrii` знает все эти алиасы и имеет настроенный SSH-доступ ко всем серверам.")
+    lines.append("")
+    lines.append("_Вы можете просто написать в чат бота, например:_")
+    lines.append("• «Сделай что-то с сервером home»")
+    lines.append("• «Проверь нагрузку на шкафу»")
+    lines.append("• «Перезагрузи службу на сервере vpn»")
+    return "\n".join(lines)
+
+def build_servers_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "🔙 Главное меню", "callback_data": "nav:main"}]
+        ]
+    }
+
 def build_main_menu_keyboard(tg_id: int = 0) -> dict:
     stats = database.get_stats()
     rows = [
@@ -65,9 +94,10 @@ def build_main_menu_keyboard(tg_id: int = 0) -> dict:
         ],
         [
             {"text": "➕ Create Task", "callback_data": "action:create_task"},
-            {"text": "🔑 API Keys", "callback_data": "action:api_keys"}
+            {"text": "🖥 Servers & Cluster", "callback_data": "action:servers"}
         ],
         [
+            {"text": "🔑 API Keys", "callback_data": "action:api_keys"},
             {"text": "📚 API Documentation", "callback_data": "action:api_docs"}
         ]
     ]
@@ -499,7 +529,7 @@ async def handle_callback_query(cq: dict):
     await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id})
 
     # Clear pending state if navigation occurs
-    if data.startswith("nav:") or data.startswith("col:") or data.startswith("task:") or data.startswith("docs:") or data == "action:api_docs":
+    if data.startswith("nav:") or data.startswith("col:") or data.startswith("task:") or data.startswith("docs:") or data in ["action:api_docs", "action:servers", "prompt:cancel"]:
         user_states.pop(tg_id, None)
 
     # Route navigation
@@ -705,6 +735,18 @@ async def handle_callback_query(cq: dict):
             "reply_markup": reply_markup
         })
 
+    elif data == "action:servers":
+        text = build_servers_text()
+        reply_markup = build_servers_keyboard()
+        if message_id:
+            await send_tg_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "reply_markup": reply_markup
+            })
+
     elif data == "act:gen_key":
         raw_key, info = database.generate_api_key(username, "Telegram Bot Key")
         text = (
@@ -758,6 +800,107 @@ async def handle_callback_query(cq: dict):
         reply_markup = build_task_keyboard(updated_task, username)
         status_word = "enabled" if new_val else "disabled"
         await send_tg_request("answerCallbackQuery", {"callback_query_id": cq_id, "text": f"🤖 AI Worker {status_word} for task #{task_id}"})
+        if message_id:
+            await send_tg_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "Markdown",
+                "reply_markup": reply_markup
+            })
+
+    elif data == "prompt:run_ai":
+        st = user_states.pop(tg_id, None)
+        prompt_text = st.get("prompt_text", "") if st else ""
+        if not prompt_text:
+            await send_tg_request("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id,
+                "text": "❌ Время действия запроса истекло или текст пуст.",
+                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Главное меню", "callback_data": "nav:main"}]]}
+            })
+            return
+        lines = prompt_text.split("\n", 1)
+        title = lines[0].strip()
+        desc = lines[1].strip() if len(lines) > 1 else ""
+        ai_global = database.is_ai_mode()
+        task = database.create_task(title=title, description=desc, created_by=username, ai_enabled=1)
+        notice_ai = "AI-агент на сервере `andrii` автоматически возьмет ее в работу." if ai_global else "⚠️ Внимание: глобальный AI Mode сейчас выключен в настройках. Включите его в настройках проекта, чтобы агент начал выполнение."
+        await send_tg_request("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": (
+                f"🤖 *Задача передана AI-агенту!*\n\n"
+                f"📌 *Task #{task['id']}:* {task['title']}\n"
+                f"👤 Автор: `@{username}`\n"
+                f"⚙️ Статус: `{task['status']}` | 🤖 AI Worker: `Разрешен`\n\n"
+                f"_{notice_ai}_"
+            ),
+            "parse_mode": "Markdown",
+            "reply_markup": {"inline_keyboard": [
+                [{"text": f"📋 Открыть задачу #{task['id']}", "callback_data": f"task:{task['id']}"}],
+                [{"text": "🏠 Главное меню", "callback_data": "nav:main"}]
+            ]}
+        })
+
+    elif data == "prompt:ask_ai":
+        st = user_states.pop(tg_id, None)
+        prompt_text = st.get("prompt_text", "") if st else ""
+        if not prompt_text:
+            await send_tg_request("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id,
+                "text": "❌ Время действия запроса истекло или текст пуст.",
+                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Главное меню", "callback_data": "nav:main"}]]}
+            })
+            return
+        query = database.create_chat_query(user=username, prompt=prompt_text, task_ids="")
+        await send_tg_request("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": (
+                f"💬 *Вопрос передан AI-ассистенту (Query #{query['id']})*\n\n"
+                f"«_{prompt_text}_»\n\n"
+                f"⏳ AI-агент на сервере `andrii` обрабатывает ваш запрос с учетом инфраструктуры кластера (home, vpn, andrii, dmitry).\n"
+                f"Ответ поступит сюда сразу после генерации."
+            ),
+            "parse_mode": "Markdown",
+            "reply_markup": {"inline_keyboard": [
+                [{"text": "🏠 Главное меню", "callback_data": "nav:main"}]
+            ]}
+        })
+
+    elif data == "prompt:create_task":
+        st = user_states.pop(tg_id, None)
+        prompt_text = st.get("prompt_text", "") if st else ""
+        if not prompt_text:
+            await send_tg_request("editMessageText", {
+                "chat_id": chat_id, "message_id": message_id,
+                "text": "❌ Время действия запроса истекло.",
+                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Главное меню", "callback_data": "nav:main"}]]}
+            })
+            return
+        lines = prompt_text.split("\n", 1)
+        title = lines[0].strip()
+        desc = lines[1].strip() if len(lines) > 1 else ""
+        task = database.create_task(title=title, description=desc, created_by=username, ai_enabled=0)
+        await send_tg_request("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": (
+                f"✅ *Задача создана в колонке Open (без AI)!*\n\n"
+                f"📌 *Task #{task['id']}:* {task['title']}\n"
+                f"👤 Автор: `@{username}`\n"
+            ),
+            "parse_mode": "Markdown",
+            "reply_markup": {"inline_keyboard": [
+                [{"text": f"📋 Открыть задачу #{task['id']}", "callback_data": f"task:{task['id']}"}],
+                [{"text": "🏠 Главное меню", "callback_data": "nav:main"}]
+            ]}
+        })
+
+    elif data == "prompt:cancel":
+        user_states.pop(tg_id, None)
+        text = build_main_menu_text(username, tg_id)
+        reply_markup = build_main_menu_keyboard(tg_id)
         if message_id:
             await send_tg_request("editMessageText", {
                 "chat_id": chat_id,
@@ -997,8 +1140,21 @@ async def handle_incoming_message(msg: dict):
         })
         return
 
-    # If user sent /start or /menu or has no active state
-    if text in ["/start", "/menu"] or not state_info:
+    # Infrastructure / Servers quick commands
+    if text in ["/servers", "/cluster", "/hosts", "/infra", "/infrastructure"]:
+        user_states.pop(tg_id, None)
+        servers_text = build_servers_text()
+        reply_markup = build_servers_keyboard()
+        await send_tg_request("sendMessage", {
+            "chat_id": chat_id,
+            "text": servers_text,
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup
+        })
+        return
+
+    # If user sent /start or /menu
+    if text in ["/start", "/menu"]:
         user_states.pop(tg_id, None)
         menu_text = build_main_menu_text(username, tg_id)
         reply_markup = build_main_menu_keyboard(tg_id)
@@ -1007,6 +1163,29 @@ async def handle_incoming_message(msg: dict):
             "text": menu_text,
             "parse_mode": "Markdown",
             "reply_markup": reply_markup
+        })
+        return
+
+    # If user sent free text and has no active state (e.g. "сделай чтото с сервером home")
+    if not state_info:
+        user_states[tg_id] = {"state": "pending_prompt", "prompt_text": text}
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🤖 Исполнить через AI Agent", "callback_data": "prompt:run_ai"}],
+                [{"text": "💬 Спросить AI-ассистента", "callback_data": "prompt:ask_ai"}],
+                [{"text": "📥 Добавить в Open (без AI)", "callback_data": "prompt:create_task"}],
+                [{"text": "❌ Отмена", "callback_data": "prompt:cancel"}]
+            ]
+        }
+        await send_tg_request("sendMessage", {
+            "chat_id": chat_id,
+            "text": (
+                f"💬 *Получен запрос:*\n"
+                f"«_{text}_»\n\n"
+                f"Выберите, как обработать этот запрос:"
+            ),
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
         })
         return
 
@@ -1296,6 +1475,46 @@ async def send_incident_alert_to_recipients(title: str, report_text: str, resolv
             except Exception as e:
                 logger.error(f"Failed to send incident alert to {r_id}: {e}")
     return sent
+
+async def send_ai_chat_response_to_user(username: str, response_text: str) -> bool:
+    """
+    Sends the AI Assistant response back to the Telegram user who submitted the prompt.
+    """
+    tg_id = config.USERNAME_TO_TG.get(username)
+    if not tg_id:
+        users = database.get_all_users()
+        for u in users:
+            if u["username"] == username:
+                tg_id = u["telegram_id"]
+                break
+    if not tg_id:
+        logger.warning(f"Could not find Telegram ID for username: {username}")
+        return False
+    
+    header = "🤖 *Ответ AI-ассистента:*\n────────────────────────\n"
+    footer = "\n────────────────────────"
+    full_text = header + response_text.strip() + footer
+    
+    # Send message with fallback to plain text if Markdown parsing fails
+    res = await send_tg_request("sendMessage", {
+        "chat_id": tg_id,
+        "text": full_text[:4000],
+        "parse_mode": "Markdown",
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "🏠 Главное меню", "callback_data": "nav:main"}]
+        ]}
+    })
+    if not res or not res.get("ok"):
+        plain_text = f"🤖 Ответ AI-ассистента:\n------------------------\n{response_text.strip()[:3800]}\n------------------------"
+        res2 = await send_tg_request("sendMessage", {
+            "chat_id": tg_id,
+            "text": plain_text,
+            "reply_markup": {"inline_keyboard": [
+                [{"text": "🏠 Главное меню", "callback_data": "nav:main"}]
+            ]}
+        })
+        return bool(res2 and res2.get("ok"))
+    return True
 
 async def start_telegram_bot_poller():
     """
